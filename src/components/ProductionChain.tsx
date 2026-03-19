@@ -8,7 +8,8 @@ import {
   recomputeChainFromStep,
   getLinearChainItems,
 } from "@/lib/chain";
-import { getItem, getFluid, getBuilding, getMiner } from "@/lib/db";
+import { getBuilding, getMiner } from "@/lib/db";
+import { getItemDisplayName } from "@/lib/itemDisplayName";
 
 const BUILDING_LABELS: Record<string, string> = {
   "miner-mk1": "Miner MK1",
@@ -34,7 +35,7 @@ function getBuildingName(key: string): string {
 }
 
 function getItemName(key: string): string {
-  return getItem(key)?.name ?? getFluid(key)?.name ?? key;
+  return getItemDisplayName(key);
 }
 
 interface ProductionChainProps {
@@ -151,7 +152,7 @@ export function ProductionChain({ className }: ProductionChainProps) {
               Production chain for {getItemName(selectedItem)}
             </h3>
             <span className="rounded-full bg-amber-500/20 px-3 py-1 text-sm font-medium text-amber-400">
-              Output: {finalOutput.toFixed(1)} /min
+              Output: {finalOutput.toFixed(1)}/min
             </span>
           </div>
 
@@ -180,7 +181,7 @@ export function ProductionChain({ className }: ProductionChainProps) {
                 <div className="flex items-center gap-3">
                   <div className="text-right text-sm">
                     <div className="text-zinc-400">
-                      {step.totalOutput.toFixed(1)} /min
+                      {step.totalOutput.toFixed(1)}/min
                     </div>
                     {!step.isRaw && step.totalInput > 0 && (
                       <div className="text-zinc-600">

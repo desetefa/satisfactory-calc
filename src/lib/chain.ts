@@ -16,6 +16,7 @@ import {
   getItem,
   getFluid,
   getAllMiners,
+  getAllRecipes,
 } from "./db";
 
 const RAW_ITEM_KEYS = new Set(
@@ -251,8 +252,78 @@ export function sortOptionsNonAltFirst<T extends { recipeName: string }>(opts: T
     const aAlt = a.recipeName.startsWith("Alternate");
     const bAlt = b.recipeName.startsWith("Alternate");
     if (aAlt !== bAlt) return aAlt ? 1 : -1;
-    return 0;
+    return a.recipeName.localeCompare(b.recipeName, undefined, { sensitivity: "base" });
   });
+}
+
+export type MachineOptionFromRecipe = {
+  recipeKey: string;
+  recipeName: string;
+  buildingKey: string;
+  buildingName: string;
+  outputItemKey: KeyName;
+  outputPerMachine: number;
+  inputPerMachine: number;
+};
+
+/**
+ * All ways to produce a given item (normal recipes + extractors). Non-alternate recipes sort first.
+ */
+export function getMachineOptionsForProduct(productKey: KeyName): MachineOptionFromRecipe[] {
+  const byRecipeKey = new Map<string, MachineOptionFromRecipe>();
+
+  for (const recipe of getRecipesForProduct(productKey)) {
+    const building = getBuildingForRecipe(recipe);
+    if (!building) continue;
+
+    const { ingredients, products } = recipePerMinute(recipe);
+    const productLine = products.find(([k]) => k === productKey);
+    if (!productLine) continue;
+    const [, outputQty] = productLine;
+    if (outputQty <= 0) continue;
+
+    const inputPerMachine =
+      ingredients.length > 0 ? Math.max(...ingredients.map(([, q]) => q)) : 0;
+
+    byRecipeKey.set(recipe.key_name, {
+      recipeKey: recipe.key_name,
+      recipeName: recipe.name,
+      buildingKey: building.key_name,
+      buildingName: building.name,
+      outputItemKey: productKey,
+      outputPerMachine: outputQty,
+      inputPerMachine,
+    });
+  }
+
+  for (const ext of getExtractorMachineOptionsFull()) {
+    if (ext.outputItemKey !== productKey) continue;
+    if (!byRecipeKey.has(ext.recipeKey)) {
+      byRecipeKey.set(ext.recipeKey, ext);
+    }
+  }
+
+  return sortOptionsNonAltFirst([...byRecipeKey.values()]);
+}
+
+let cachedAllProductKeys: KeyName[] | null = null;
+
+/** Every item/fluid key that can be produced by at least one recipe or extractor (sorted by display name). */
+export function getAllProductKeysWithRecipes(): KeyName[] {
+  if (cachedAllProductKeys) return cachedAllProductKeys;
+  const keys = new Set<KeyName>();
+  for (const recipe of getAllRecipes()) {
+    for (const [k] of recipe.products) keys.add(k);
+  }
+  for (const o of getExtractorMachineOptionsFull()) {
+    keys.add(o.outputItemKey);
+  }
+  cachedAllProductKeys = [...keys].sort((a, b) => {
+    const na = getItem(a)?.name ?? getFluid(a)?.name ?? a;
+    const nb = getItem(b)?.name ?? getFluid(b)?.name ?? b;
+    return na.localeCompare(nb, undefined, { sensitivity: "base" });
+  });
+  return cachedAllProductKeys;
 }
 
 /** Machine options (recipes + buildings) that consume a given item */

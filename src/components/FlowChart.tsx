@@ -6,9 +6,11 @@ import type { KeyName } from "@/lib/types";
 import {
   buildChain,
   computeChainFromOutput,
+  getAllProductKeysWithRecipes,
   getExtractorMachineOptions,
   getExtractorMachineOptionsFull,
   getMachineOptionsForInput,
+  getMachineOptionsForProduct,
   getRecipeInputsPerMinute,
   sortOptionsNonAltFirst,
 } from "@/lib/chain";
@@ -22,9 +24,14 @@ import {
   generateChartId,
   type SavedChart,
 } from "@/lib/chartStorage";
+import {
+  abbreviateItemDisplayName,
+  getItemDisplayName,
+  type ItemDisplayDensity,
+} from "@/lib/itemDisplayName";
 
-function getItemName(key: string): string {
-  return getItem(key)?.name ?? getFluid(key)?.name ?? key;
+function getItemName(key: string, density: ItemDisplayDensity = "comfortable"): string {
+  return getItemDisplayName(key, density);
 }
 
 /** Format rate for display - shows decimals when needed (e.g. 37.5, 60) */
@@ -36,6 +43,72 @@ function formatRate(n: number): string {
 /** Number of input slots for a building (Constructor 1, Assembler 2, Manufacturer 4, etc.) */
 function getInputSlots(buildingKey: string): number {
   return getBuilding(buildingKey)?.max ?? 0;
+}
+
+/** Draggable percent: drag left/right to adjust value (1–250). Uses pointer capture so drag continues when mouse moves outside. */
+function DraggablePercent({
+  value,
+  onChange,
+  min = 1,
+  max = 250,
+  className = "",
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  className?: string;
+}) {
+  const handlePointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const target = e.currentTarget as HTMLElement;
+    const pointerId = e.pointerId;
+    target.setPointerCapture(pointerId);
+    const startX = e.clientX;
+    /** Value at pointer down — cumulative dx avoids per-move rounding + magnetic snap feel */
+    const startValue = value;
+    const handleMove = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const next = Math.min(max, Math.max(min, Math.round(startValue + dx / 2)));
+      onChange(next);
+    };
+    const handleUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== pointerId) return;
+      document.removeEventListener("pointermove", handleMove);
+      document.removeEventListener("pointerup", handleUp);
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
+    document.addEventListener("pointermove", handleMove);
+    document.addEventListener("pointerup", handleUp);
+      document.body.style.userSelect = "none";
+    document.body.style.cursor = "none";
+  };
+
+  return (
+    <span
+      role="slider"
+      tabIndex={0}
+      aria-valuemin={min}
+      aria-valuemax={max}
+      aria-valuenow={value}
+      className={`cursor-ew-resize select-none touch-none ${className}`}
+      onPointerDown={handlePointerDown}
+      onKeyDown={(e) => {
+        const step = e.shiftKey ? 10 : 1;
+        if (e.key === "ArrowLeft") {
+          e.preventDefault();
+          onChange(Math.max(min, value - step));
+        } else if (e.key === "ArrowRight") {
+          e.preventDefault();
+          onChange(Math.min(max, value + step));
+        }
+      }}
+    >
+      {value}%
+    </span>
+  );
 }
 
 type MachineOption = {
@@ -218,7 +291,14 @@ function getUniqueBuildings(options: MachineOption[]): { buildingKey: string; bu
   return result;
 }
 
+type AddMachineModalTab = "machine" | "product";
+
 function AddMachineModal({ title, options, onSelect, onClose }: AddMachineModalProps) {
+  const [tab, setTab] = useState<AddMachineModalTab>("machine");
+  const [selectedBuilding, setSelectedBuilding] = useState<{ buildingKey: string; buildingName: string } | null>(null);
+  const [productPickKey, setProductPickKey] = useState<KeyName | null>(null);
+  const [productQuery, setProductQuery] = useState("");
+
   const sorted = sortOptionsNonAltFirst(options);
   const allBuildings = getUniqueBuildings(sorted);
 
@@ -230,6 +310,49 @@ function AddMachineModal({ title, options, onSelect, onClose }: AddMachineModalP
     .filter((b) => !getMiner(b.buildingKey))
     .sort((a, b) => getInputSlots(a.buildingKey) - getInputSlots(b.buildingKey));
 
+  const productOptions = selectedBuilding
+    ? sorted.filter((opt) => opt.buildingKey === selectedBuilding.buildingKey)
+    : [];
+
+  const allProductKeys = useMemo(() => getAllProductKeysWithRecipes(), []);
+  const productRecipes = useMemo(
+    () => (productPickKey ? getMachineOptionsForProduct(productPickKey) : []),
+    [productPickKey]
+  );
+
+  const filteredProductKeys = useMemo(() => {
+    const q = productQuery.trim().toLowerCase();
+    if (!q) return allProductKeys;
+    return allProductKeys.filter((key) => {
+      const label = getItemName(key).toLowerCase();
+      return label.includes(q) || key.toLowerCase().includes(q);
+    });
+  }, [allProductKeys, productQuery]);
+
+  const switchTab = (next: AddMachineModalTab) => {
+    setTab(next);
+    setSelectedBuilding(null);
+    setProductPickKey(null);
+    setProductQuery("");
+  };
+
+  const showBack =
+    (tab === "machine" && selectedBuilding !== null) || (tab === "product" && productPickKey !== null);
+
+  const handleBack = () => {
+    if (tab === "machine") setSelectedBuilding(null);
+    else setProductPickKey(null);
+  };
+
+  const headerTitle =
+    tab === "product" && productPickKey
+      ? `${getItemName(productPickKey)} – Choose recipe`
+      : tab === "product"
+        ? "Choose product"
+        : selectedBuilding
+          ? `${selectedBuilding.buildingName} – Choose product`
+          : title;
+
   const renderGroup = (label: string, buildings: typeof allBuildings) => {
     if (buildings.length === 0) return null;
     return (
@@ -240,7 +363,7 @@ function AddMachineModal({ title, options, onSelect, onClose }: AddMachineModalP
             <button
               key={buildingKey}
               type="button"
-              onClick={() => onSelect(firstOption)}
+              onClick={() => setSelectedBuilding({ buildingKey, buildingName })}
               className="rounded-xl border-2 border-zinc-700 bg-zinc-800/80 px-5 py-4 text-left transition hover:border-amber-500/50 hover:bg-zinc-800"
             >
               <div className="font-medium text-zinc-100">{buildingName}</div>
@@ -264,23 +387,147 @@ function AddMachineModal({ title, options, onSelect, onClose }: AddMachineModalP
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-zinc-700 px-6 py-4">
-          <h2 className="text-xl font-semibold text-zinc-100">{title}</h2>
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            {showBack && (
+              <button
+                type="button"
+                onClick={handleBack}
+                className="shrink-0 rounded-lg p-1.5 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
+                title="Back"
+              >
+                <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+                </svg>
+              </button>
+            )}
+            <h2 className="min-w-0 truncate text-xl font-semibold text-zinc-100">{headerTitle}</h2>
+          </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
+            className="shrink-0 rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
           >
             <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
         </div>
-        <div className="max-h-[70vh] overflow-y-auto p-6">
-          <p className="mb-4 text-sm text-zinc-500">
-            Choose a machine type. You&apos;ll select what it produces in the next step.
-          </p>
-          {renderGroup("Extractors", extractors)}
-          {renderGroup("Producers", producers)}
+
+        <div className="border-b border-zinc-800 px-6 pt-3">
+          <div className="flex gap-1 rounded-lg bg-zinc-800/60 p-1">
+            <button
+              type="button"
+              onClick={() => switchTab("machine")}
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition ${
+                tab === "machine" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              By machine
+            </button>
+            <button
+              type="button"
+              onClick={() => switchTab("product")}
+              className={`flex-1 rounded-md px-3 py-2 text-sm font-medium transition ${
+                tab === "product" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"
+              }`}
+            >
+              By product
+            </button>
+          </div>
+        </div>
+
+        <div className="max-h-[calc(85vh-11rem)] overflow-y-auto p-6">
+          {tab === "machine" ? (
+            selectedBuilding ? (
+              <>
+                <p className="mb-4 text-sm text-zinc-500">
+                  What should this {selectedBuilding.buildingName} produce?
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {productOptions.map((opt) => (
+                    <button
+                      key={opt.recipeKey}
+                      type="button"
+                      onClick={() => onSelect(opt)}
+                      className="rounded-xl border-2 border-zinc-700 bg-zinc-800/80 px-5 py-4 text-left transition hover:border-amber-500/50 hover:bg-zinc-800"
+                    >
+                      <div className="font-medium text-zinc-100">{opt.recipeName}</div>
+                      <div className="mt-1 text-xs text-zinc-500">
+                        {formatRate(opt.outputPerMachine)}/min per machine
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mb-4 text-sm text-zinc-500">
+                  Choose a machine type, then select what it produces.
+                </p>
+                {renderGroup("Extractors", extractors)}
+                {renderGroup("Producers", producers)}
+              </>
+            )
+          ) : productPickKey ? (
+            <>
+              <p className="mb-4 text-sm text-zinc-500">
+                Pick a recipe (standard recipes first). The correct building is selected automatically.
+              </p>
+              {productRecipes.length === 0 ? (
+                <p className="text-sm text-zinc-500">No recipes found for this product.</p>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {productRecipes.map((opt) => (
+                    <button
+                      key={opt.recipeKey}
+                      type="button"
+                      onClick={() => onSelect(opt)}
+                      className="rounded-xl border-2 border-zinc-700 bg-zinc-800/80 px-5 py-4 text-left transition hover:border-amber-500/50 hover:bg-zinc-800"
+                    >
+                      <div className="font-medium text-zinc-100">{opt.recipeName}</div>
+                      <div className="mt-1 text-xs text-zinc-500">{opt.buildingName}</div>
+                      <div className="mt-1 text-xs text-zinc-500">
+                        {formatRate(opt.outputPerMachine)}/min per machine
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <>
+              <p className="mb-3 text-sm text-zinc-500">
+                Search or pick an output item, then choose how to produce it.
+              </p>
+              <input
+                type="search"
+                value={productQuery}
+                onChange={(e) => setProductQuery(e.target.value)}
+                placeholder="Filter products…"
+                className="mb-4 w-full rounded-lg border border-zinc-700 bg-zinc-800/80 px-4 py-2.5 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-amber-500/50 focus:outline-none focus:ring-1 focus:ring-amber-500/30"
+              />
+              <div className="max-h-[min(50vh,28rem)] overflow-y-auto rounded-lg border border-zinc-800">
+                {filteredProductKeys.length === 0 ? (
+                  <p className="p-4 text-sm text-zinc-500">No matching products.</p>
+                ) : (
+                  <ul className="divide-y divide-zinc-800">
+                    {filteredProductKeys.map((key) => (
+                      <li key={key}>
+                        <button
+                          type="button"
+                          onClick={() => setProductPickKey(key)}
+                          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-zinc-200 transition hover:bg-zinc-800/80"
+                        >
+                          <span className="font-medium">{getItemName(key)}</span>
+                          <span className="text-zinc-600">→</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -331,6 +578,63 @@ function SaveAsModal({
           >
             Save
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BuildInventoryModal({
+  buildings,
+  powerShards,
+  onClose,
+}: {
+  buildings: { buildingKey: string; buildingName: string; count: number }[];
+  powerShards: number;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[85vh] w-full max-w-md overflow-hidden rounded-2xl border-2 border-zinc-700 bg-zinc-900 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-zinc-700 px-6 py-4">
+          <h2 className="text-xl font-semibold text-zinc-100">Build inventory</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
+          >
+            <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="max-h-[min(60vh,480px)] overflow-y-auto p-6">
+          <p className="mb-4 text-sm text-zinc-500">
+            Machines and power shards for overclock (&gt;100%: up to 3 shards per machine at 201–250%).
+          </p>
+          <ul className="space-y-2">
+            {buildings.map((row) => (
+              <li
+                key={row.buildingKey}
+                className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2 text-sm text-zinc-200"
+              >
+                <span className="min-w-0">{row.buildingName}</span>
+                <span className="shrink-0 font-mono text-amber-400">×{row.count}</span>
+              </li>
+            ))}
+            {powerShards > 0 && (
+              <li className="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-950/50 px-3 py-2 text-sm text-zinc-200">
+                <span className="min-w-0">Power Shard</span>
+                <span className="shrink-0 font-mono text-purple-300">×{powerShards}</span>
+              </li>
+            )}
+          </ul>
         </div>
       </div>
     </div>
@@ -394,7 +698,7 @@ function EditNodeModal({
                   onClick={() => setProducesModalOpen(true)}
                   className="flex w-full items-center justify-between rounded-lg border border-zinc-700 bg-zinc-800 px-4 py-2.5 text-left transition hover:bg-zinc-700"
                 >
-                  <span className="font-medium text-amber-400">{node.outputItemName}</span>
+                  <span className="font-medium text-amber-400">{getItemName(node.outputItemKey)}</span>
                   <span className="text-xs text-zinc-500">▼</span>
                 </button>
               ) : (
@@ -497,15 +801,10 @@ function EditNodeModal({
             </div>
             <div>
               <label className="mb-1 block text-xs text-zinc-500">Clock %</label>
-              <input
-                type="number"
-                min={1}
-                max={250}
+              <DraggablePercent
                 value={node.clockPercent}
-                onChange={(e) =>
-                  onUpdate({ clockPercent: Math.min(250, Math.max(1, parseInt(e.target.value, 10) || 100)) })
-                }
-                className="w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-center text-sm text-zinc-100"
+                onChange={(v) => onUpdate({ clockPercent: v })}
+                className="block w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-center text-sm text-zinc-100"
               />
             </div>
             {node.isRaw && (
@@ -570,7 +869,7 @@ function EditNodeModal({
                     }`}
                   >
                     <div className="font-medium">{getItemName(opt.outputItemKey)}</div>
-                    <div className="text-xs text-zinc-500">{formatRate(opt.outputPerMachine)} /min</div>
+                    <div className="text-xs text-zinc-500">{formatRate(opt.outputPerMachine)}/min</div>
                     {getInputSlots(opt.buildingKey) > 0 && (
                       <div className="mt-0.5 text-xs text-zinc-500">{getInputSlots(opt.buildingKey)} input{getInputSlots(opt.buildingKey) !== 1 ? "s" : ""}</div>
                     )}
@@ -694,36 +993,61 @@ function computeFinalOutputs(
   const usedItems = new Set<KeyName>();
   const itemOrder: KeyName[] = [];
 
-  function walk(t: TreeNode) {
-    if (!t.node.outputItemKey) return;
-    const key = t.node.outputItemKey;
+  function pushItemKey(key: KeyName) {
     usedItems.add(key);
     if (!itemOrder.includes(key)) itemOrder.push(key);
+  }
+
+  /**
+   * Surplus = total produced − total consumed (globally in the flow), not tree-edge primary belt only.
+   * `FlowRateData.receivesInput` is only the ingredient that matches the *tree* parent output; multi-input
+   * machines (e.g. RIP) show real intake on `inputs[]`. Summing `inputs[].receivesInput` per item matches the sim.
+   */
+  for (const t of getAllNodes(tree)) {
+    if (!t.node.outputItemKey) continue;
+    const outKey = t.node.outputItemKey;
+    pushItemKey(outKey);
 
     const fd = flowRates.get(t.id);
-    const outputRate =
-      fd && "currentOutput" in fd
-        ? fd.currentOutput
-        : getEffectiveOutputPerMachine(t.node) * (t.node.clockPercent / 100) * t.node.count;
-    produced.set(key, (produced.get(key) ?? 0) + outputRate);
+    let outputRate: number;
+    if (fd && "currentOutput" in fd) {
+      outputRate = (fd as FlowRateData).currentOutput;
+    } else if (fd && "parentSending" in fd) {
+      outputRate = (fd as { parentSending: number }).parentSending;
+    } else {
+      outputRate =
+        getEffectiveOutputPerMachine(t.node) * (t.node.clockPercent / 100) * t.node.count;
+    }
+    produced.set(outKey, (produced.get(outKey) ?? 0) + outputRate);
 
     if (t.node.recipeKey) {
       for (const { itemKey } of getRecipeInputsPerMinute(t.node.recipeKey)) {
-        usedItems.add(itemKey);
+        pushItemKey(itemKey);
       }
     }
     for (const edge of t.inputEdges ?? []) {
-      usedItems.add(edge.itemKey);
+      pushItemKey(edge.itemKey);
     }
 
-    for (const child of t.children) {
-      const cfd = flowRates.get(child.id);
-      const receives = cfd && "receivesInput" in cfd ? cfd.receivesInput : 0;
-      consumed.set(key, (consumed.get(key) ?? 0) + receives);
-      walk(child);
+    if (t.node.isRaw || !t.node.recipeKey) continue;
+
+    const cfd = flowRates.get(t.id) as FlowRateData | undefined;
+    if (!cfd || !("needsInput" in cfd)) continue;
+
+    if (cfd.inputs && cfd.inputs.length > 0) {
+      for (const inp of cfd.inputs) {
+        pushItemKey(inp.itemKey);
+        consumed.set(inp.itemKey, (consumed.get(inp.itemKey) ?? 0) + inp.receivesInput);
+      }
+    } else if (cfd.receivesInput > 0) {
+      const rIn = getRecipeInputsPerMinute(t.node.recipeKey);
+      if (rIn.length === 1) {
+        const ik = rIn[0]!.itemKey;
+        pushItemKey(ik);
+        consumed.set(ik, (consumed.get(ik) ?? 0) + cfd.receivesInput);
+      }
     }
   }
-  walk(tree);
 
   const byItem = new Map<KeyName, number>();
   const allKeys = new Set<KeyName>([...produced.keys(), ...consumed.keys()]);
@@ -745,8 +1069,74 @@ function computeFinalOutputs(
   return [...ordered, ...rest];
 }
 
+function StorageStrip({ items }: { items: FinalOutput[] }) {
+  return (
+    <aside
+      className="flex h-full min-h-0 w-56 shrink-0 flex-col border-l border-zinc-800 bg-[#101010] backdrop-blur-md"
+      aria-label="Storage"
+    >
+      <div className="shrink-0 border-b border-zinc-800 px-4 py-4">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Storage</h2>
+        <p className="mt-1 text-xs leading-snug text-zinc-600">
+          Surplus production (not consumed downstream), items/min
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
+        {items.length === 0 ? (
+          <p className="text-sm text-zinc-600">Nothing in storage</p>
+        ) : (
+          <ul className="space-y-3">
+            {items.map(({ itemKey, itemName, rate }) => (
+              <li key={itemKey} className="flex flex-col gap-0.5 border-b border-zinc-800/80 pb-3 last:border-0 last:pb-0">
+                <span className="text-sm font-medium leading-tight text-zinc-200">{itemName}</span>
+                <span className="font-mono text-xs text-amber-400/90">{formatRate(rate)}/min</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function getAllNodes(tree: TreeNode): TreeNode[] {
   return [tree, ...tree.children.flatMap((c) => getAllNodes(c))];
+}
+
+/** Power shards slotted for overclock: 101–150% → 1, 151–200% → 2, 201–250% → 3 per machine. */
+function powerShardsForClockPercent(clockPercent: number): number {
+  if (clockPercent <= 100) return 0;
+  if (clockPercent <= 150) return 1;
+  if (clockPercent <= 200) return 2;
+  return 3;
+}
+
+type BuildInventoryResult = {
+  buildings: { buildingKey: string; buildingName: string; count: number }[];
+  powerShards: number;
+};
+
+/** Machines and power shards needed for the current flow. */
+function computeBuildInventory(tree: TreeNode): BuildInventoryResult | null {
+  if (!tree.node.outputItemKey) return null;
+
+  const buildingMap = new Map<string, { buildingName: string; count: number }>();
+  let powerShards = 0;
+  for (const t of getAllNodes(tree)) {
+    const { buildingKey, buildingName, count, outputItemKey, clockPercent } = t.node;
+    if (!buildingKey || !outputItemKey) continue;
+    const prev = buildingMap.get(buildingKey);
+    if (prev) prev.count += count;
+    else buildingMap.set(buildingKey, { buildingName, count });
+    const perMachine = powerShardsForClockPercent(clockPercent);
+    powerShards += perMachine * count;
+  }
+
+  const buildings = [...buildingMap.entries()]
+    .map(([buildingKey, { buildingName, count }]) => ({ buildingKey, buildingName, count }))
+    .sort((a, b) => a.buildingName.localeCompare(b.buildingName));
+
+  return { buildings, powerShards };
 }
 
 function findNode(tree: TreeNode, id: string): TreeNode | null {
@@ -756,6 +1146,136 @@ function findNode(tree: TreeNode, id: string): TreeNode | null {
     if (found) return found;
   }
   return null;
+}
+
+const EMPTY_FLOW_RELATED_IDS = new Set<string>();
+
+/**
+ * Horizontal flow columns (same grouping as TreeLevelSlices): machines at the same “stage”
+ * appear together even when they’re not in each other’s parent/child chain.
+ */
+function getFlowSlices(t: TreeNode): TreeNode[][] {
+  if (!t.node.outputItemKey) return [];
+  const result: TreeNode[][] = [];
+  const rawChildren = t.children.filter((c) => c.node.isRaw);
+  const consumerChildren = t.children.filter((c) => !c.node.isRaw);
+  const level0 = [t, ...rawChildren];
+  let level: TreeNode[] = level0;
+  let nextLevel: TreeNode[] = [
+    ...consumerChildren,
+    ...rawChildren.flatMap((c) => c.children),
+  ];
+  while (level.length > 0) {
+    result.push(level);
+    level = nextLevel;
+    nextLevel = level.flatMap((n) => n.children);
+  }
+  return result;
+}
+
+/**
+ * Who supplies `itemKey` to this consumer: tree parent, explicit input edge, or (fallback)
+ * any node in an earlier horizontal slice that outputs that item (matches add-machine / pool semantics).
+ */
+function resolveSupplierIds(tree: TreeNode, consumer: TreeNode, itemKey: KeyName): string[] {
+  const parent = consumer.parentId ? findNode(tree, consumer.parentId) : null;
+  if (parent?.node.outputItemKey === itemKey) {
+    return [parent.id];
+  }
+
+  const edge = consumer.inputEdges?.find((e) => e.itemKey === itemKey);
+  if (edge) {
+    return [edge.producerId];
+  }
+
+  const slices = getFlowSlices(tree);
+  const consumerSlice = slices.findIndex((sl) => sl.some((n) => n.id === consumer.id));
+  if (consumerSlice <= 0) return [];
+
+  const found: string[] = [];
+  for (let s = consumerSlice - 1; s >= 0; s--) {
+    for (const n of slices[s]!) {
+      if (n.node.outputItemKey === itemKey) found.push(n.id);
+    }
+    if (found.length > 0) break;
+  }
+  return [...new Set(found)];
+}
+
+/** Transitive upstream: every machine (and miner) needed to produce the hovered node's inputs. */
+function collectUpstreamSupplyIds(tree: TreeNode, nodeId: string, into: Set<string>) {
+  const node = findNode(tree, nodeId);
+  if (!node) return;
+
+  if (node.node.isRaw || !node.node.recipeKey) {
+    return;
+  }
+
+  for (const { itemKey } of getRecipeInputsPerMinute(node.node.recipeKey)) {
+    for (const sid of resolveSupplierIds(tree, node, itemKey)) {
+      if (sid === nodeId) continue;
+      if (!into.has(sid)) {
+        into.add(sid);
+        collectUpstreamSupplyIds(tree, sid, into);
+      }
+    }
+  }
+}
+
+/**
+ * All nodes that supply the hovered machine (transitive recipe closure). Excludes `nodeId`.
+ */
+function getRelatedNodeIdsForHover(tree: TreeNode, nodeId: string): Set<string> {
+  if (!findNode(tree, nodeId)) return EMPTY_FLOW_RELATED_IDS;
+  const ids = new Set<string>();
+  collectUpstreamSupplyIds(tree, nodeId, ids);
+  return ids;
+}
+
+/**
+ * Add missing {@link InputEdge} rows so each recipe input is either from the tree parent or has an edge.
+ * Older charts and some trees only had pool semantics in {@link computeFlowRates}; without edges, belt
+ * dropdowns updated {@link TreeNode.incomingBeltKey} but flow math ignored it for those inputs.
+ */
+function synthesizeMissingInputEdges(tree: TreeNode): TreeNode {
+  let out = tree;
+
+  function visit(t: TreeNode) {
+    for (const c of t.children) {
+      visit(c);
+    }
+    if (!t.node.recipeKey || t.node.isRaw) return;
+
+    const parent = t.parentId ? findNode(out, t.parentId) : null;
+    const existingKeys = new Set((t.inputEdges ?? []).map((e) => e.itemKey));
+    const newEdges: InputEdge[] = [];
+
+    for (const { itemKey, perMinute } of getRecipeInputsPerMinute(t.node.recipeKey)) {
+      if (existingKeys.has(itemKey)) continue;
+      if (parent?.node.outputItemKey === itemKey) continue;
+
+      const suppliers = resolveSupplierIds(out, t, itemKey);
+      if (suppliers.length === 0) continue;
+
+      const edge: InputEdge = {
+        itemKey,
+        producerId: suppliers[0]!,
+        beltKey: pickDefaultBelt(perMinute * t.node.count),
+      };
+      newEdges.push(edge);
+      existingKeys.add(itemKey);
+    }
+
+    if (newEdges.length > 0) {
+      out = replaceNode(out, t.id, (tn) => ({
+        ...tn,
+        inputEdges: [...(tn.inputEdges ?? []), ...newEdges],
+      }));
+    }
+  }
+
+  visit(tree);
+  return out;
 }
 
 function replaceNode(tree: TreeNode, nodeId: string, replacer: (t: TreeNode) => TreeNode): TreeNode {
@@ -961,21 +1481,7 @@ function getChildDemandForParentOutput(child: TreeNode, parentOutputItemKey: Key
 }
 
 function getSlicesForFlow(tree: TreeNode): TreeNode[][] {
-  if (!tree.node.outputItemKey) return [];
-  const result: TreeNode[][] = [];
-  const rawChildren = tree.children.filter((c) => c.node.isRaw);
-  const consumerChildren = tree.children.filter((c) => !c.node.isRaw);
-  let level: TreeNode[] = [tree, ...rawChildren];
-  let nextLevel: TreeNode[] = [
-    ...consumerChildren,
-    ...rawChildren.flatMap((c) => c.children),
-  ];
-  while (level.length > 0) {
-    result.push(level);
-    level = nextLevel;
-    nextLevel = level.flatMap((n) => n.children);
-  }
-  return result;
+  return getFlowSlices(tree);
 }
 
 function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSending: number }> {
@@ -1003,7 +1509,7 @@ function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSe
       const recipeInputs = getRecipeInputsPerMinute(node.node.recipeKey);
       const inputs: FlowInputData[] = recipeInputs.map(({ itemKey, perMinute }) => ({
         itemKey,
-        itemName: getItemName(itemKey),
+        itemName: getItemName(itemKey, "compact"),
         needsInput: perMinute * node.node.count,
         receivesInput: 0,
       }));
@@ -1134,7 +1640,9 @@ export function FlowChart() {
   const [charts, setCharts] = useState<SavedChart[]>([]);
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [layout, setLayout] = useState<"vertical" | "horizontal">("vertical");
+  const [buildInventoryOpen, setBuildInventoryOpen] = useState(false);
+  /** Default horizontal; vertical layout kept in menu for now (deprecated path). */
+  const [layout, setLayout] = useState<"vertical" | "horizontal">("horizontal");
   const [separateAction, setSeparateAction] = useState<(() => void) | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -1145,7 +1653,7 @@ export function FlowChart() {
     if (lastId) {
       const loaded = loadChart(lastId);
       if (loaded) {
-        setTree(loaded);
+        setTree(recalcTree(synthesizeMissingInputEdges(loaded)));
         const c = saved.find((x) => x.id === lastId);
         setCurrentChartId(lastId);
         setCurrentChartName(c?.name ?? "Untitled");
@@ -1156,7 +1664,7 @@ export function FlowChart() {
   const loadChartById = useCallback((id: string) => {
     const loaded = loadChart(id);
     if (loaded) {
-      setTree(loaded);
+      setTree(recalcTree(synthesizeMissingInputEdges(loaded)));
       setCurrentChartId(id);
       const saved = getSavedCharts();
       const c = saved.find((x) => x.id === id);
@@ -1248,7 +1756,7 @@ export function FlowChart() {
       const isBranch = siblingOutputs.includes(option.outputItemKey);
       const idx = insertAtIndex ?? (isBranch ? 0 : parentTreeNode.children.length);
       let updated = addChildToNode(tree, parentTreeNode.id, n, idx, inputEdges);
-      updated = recalcTree(updated);
+      updated = recalcTree(synthesizeMissingInputEdges(updated));
       setTree(updated);
     },
     [tree]
@@ -1294,19 +1802,13 @@ export function FlowChart() {
     [tree]
   );
 
-  const updateChildBelt = useCallback(
-    (parentId: string, childId: string, incomingBeltKey: string) => {
-      setTree(updateChildBeltInTree(tree, parentId, childId, incomingBeltKey));
-    },
-    [tree]
-  );
+  const updateChildBelt = useCallback((parentId: string, childId: string, incomingBeltKey: string) => {
+    setTree((t) => updateChildBeltInTree(t, parentId, childId, incomingBeltKey));
+  }, []);
 
-  const updateInputEdgeBelt = useCallback(
-    (consumerId: string, itemKey: KeyName, beltKey: string) => {
-      setTree(updateInputEdgeBeltInTree(tree, consumerId, itemKey, beltKey));
-    },
-    [tree]
-  );
+  const updateInputEdgeBelt = useCallback((consumerId: string, itemKey: KeyName, beltKey: string) => {
+    setTree((t) => updateInputEdgeBeltInTree(t, consumerId, itemKey, beltKey));
+  }, []);
 
   const mergeNodes = useCallback(
     (parentId: string, leftId: string, rightId: string) => {
@@ -1327,28 +1829,53 @@ export function FlowChart() {
     [tree]
   );
 
+  const [flowHoverNodeId, setFlowHoverNodeId] = useState<string | null>(null);
+  const [flowPinnedNodeId, setFlowPinnedNodeId] = useState<string | null>(null);
+  /** Pinned node locks the branch highlight; hover only applies when nothing is pinned */
+  const flowFocusNodeId = flowPinnedNodeId ?? flowHoverNodeId;
+  const flowFocusRelatedIds = useMemo(
+    () =>
+      flowFocusNodeId ? getRelatedNodeIdsForHover(tree, flowFocusNodeId) : EMPTY_FLOW_RELATED_IDS,
+    [tree, flowFocusNodeId]
+  );
+  const toggleFlowPin = useCallback((id: string) => {
+    setFlowPinnedNodeId((prev) => {
+      if (prev === id) return null;
+      if (prev != null) return prev;
+      return id;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (flowPinnedNodeId && !findNode(tree, flowPinnedNodeId)) {
+      setFlowPinnedNodeId(null);
+    }
+  }, [tree, flowPinnedNodeId]);
+
+  const buildInventory = useMemo(() => computeBuildInventory(tree), [tree]);
+
   const finalOutputs = useMemo(
     () => computeFinalOutputs(tree, flowRates),
     [tree, flowRates]
   );
 
+  const storageItems = useMemo(
+    () => finalOutputs.filter((r) => r.rate > 1e-6),
+    [finalOutputs]
+  );
+
   const [addMachineOpen, setAddMachineOpen] = useState(false);
+
+  const storageStrip = <StorageStrip items={storageItems} />;
 
   const header = (
     <header className="shrink-0 border-b border-zinc-800 bg-zinc-900/30">
       <div className="flex w-full items-center justify-between px-6 py-5">
-        <div>
-          {finalOutputs.length > 0 ? (
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-              {finalOutputs.map(({ itemName, rate }) => (
-                <div key={itemName} className="flex items-center gap-2">
-                  <span className="text-zinc-400">{itemName}</span>
-                  <span className="font-medium text-amber-400">{formatRate(rate)} /min</span>
-                </div>
-              ))}
-            </div>
-          ) : (
+        <div className="min-w-0 flex-1">
+          {isEmpty ? (
             <p className="text-sm text-zinc-500">Add a machine to start</p>
+          ) : (
+            <h1 className="truncate text-lg font-medium text-zinc-200">{currentChartName}</h1>
           )}
         </div>
         <div className="relative flex items-center gap-1">
@@ -1396,6 +1923,18 @@ export function FlowChart() {
                           : undefined
                       }
                     >
+                {buildInventory && buildInventory.buildings.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBuildInventoryOpen(true);
+                      setMenuOpen(false);
+                    }}
+                    className="mb-2 block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800"
+                  >
+                    Build inventory…
+                  </button>
+                )}
                 <select
                   value={currentChartId ?? "__unsaved__"}
                   onChange={(e) => {
@@ -1474,48 +2013,61 @@ export function FlowChart() {
           onClose={() => setSaveAsOpen(false)}
         />
       )}
+      {buildInventoryOpen && buildInventory && buildInventory.buildings.length > 0 && (
+        <BuildInventoryModal
+          buildings={buildInventory.buildings}
+          powerShards={buildInventory.powerShards}
+          onClose={() => setBuildInventoryOpen(false)}
+        />
+      )}
     </header>
   );
 
   if (isEmpty && layout !== "horizontal") {
     return (
-      <>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {header}
-        <main className="min-h-0 min-w-0 flex-1 overflow-auto">
-          <div className="flex min-h-0 min-w-0 items-center justify-center p-6">
-            <div className="flex flex-col items-center">
-              <button
-                type="button"
-                onClick={() => setAddMachineOpen(true)}
-                className={`flex min-h-[120px] min-w-[120px] flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition ${addMachineOpen ? "border-amber-500/60 bg-zinc-800" : "border-dashed border-zinc-600 bg-zinc-900/50 hover:border-amber-500/40 hover:bg-zinc-800/80"}`}
-              >
-                <span className="text-3xl font-light text-zinc-400">+</span>
-                <span className="text-center text-sm font-medium text-zinc-400">Add machine</span>
-              </button>
-              {addMachineOpen && (
-                <AddMachineModal
-                  title="Add machine"
-                  options={getExtractorMachineOptions()}
-                  onSelect={(opt) => {
-                    addMachine(tree, opt);
-                    setAddMachineOpen(false);
-                  }}
-                  onClose={() => setAddMachineOpen(false)}
-                />
-              )}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+          <main className="min-h-0 min-w-0 flex-1 overflow-auto">
+            <div className="flex min-h-0 min-w-0 items-center justify-center p-6">
+              <div className="flex flex-col items-center">
+                <button
+                  type="button"
+                  onClick={() => setAddMachineOpen(true)}
+                  className={`flex min-h-[120px] min-w-[120px] flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition ${addMachineOpen ? "border-amber-500/60 bg-zinc-800" : "border-dashed border-zinc-600 bg-zinc-900/50 hover:border-amber-500/40 hover:bg-zinc-800/80"}`}
+                >
+                  <span className="text-3xl font-light text-zinc-400">+</span>
+                  <span className="text-center text-sm font-medium text-zinc-400">Add machine</span>
+                </button>
+                {addMachineOpen && (
+                  <AddMachineModal
+                    title="Add machine"
+                    options={getExtractorMachineOptions()}
+                    onSelect={(opt) => {
+                      addMachine(tree, opt);
+                      setAddMachineOpen(false);
+                    }}
+                    onClose={() => setAddMachineOpen(false)}
+                  />
+                )}
+              </div>
             </div>
-          </div>
-        </main>
-      </>
+          </main>
+          {storageStrip}
+        </div>
+      </div>
     );
   }
 
   return (
-    <>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {header}
-      <main className="min-h-0 min-w-0 flex-1 overflow-auto">
-        <div className={`flex min-h-0 min-w-0 p-6 ${layout === "horizontal" ? "min-h-full w-fit items-stretch justify-start" : "items-center justify-center"}`}>
-          <div className={layout === "horizontal" ? "flex min-h-full flex-1 flex-row items-stretch justify-start" : "flex flex-col items-center"}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+        <main className="min-h-0 min-w-0 flex-1 overflow-auto">
+          <div
+            className={`flex min-h-0 min-w-0 p-6 ${layout === "horizontal" ? "min-h-full w-fit items-stretch justify-start" : "items-center justify-center"}`}
+          >
+            <div className={layout === "horizontal" ? "flex min-h-full flex-1 flex-row items-stretch justify-start" : "flex flex-col items-center"}>
       {layout === "horizontal" ? (
         <TreeLevelSlices
           treeNode={tree}
@@ -1537,7 +2089,12 @@ export function FlowChart() {
           onRemove={undefined}
           removeNode={removeNode}
           onSetSeparateAction={setSeparateAction}
-          onSeedStarter={(t) => setTree(recalcTree(t))}
+          onSeedStarter={(t) => setTree(recalcTree(synthesizeMissingInputEdges(t)))}
+          flowFocusNodeId={flowFocusNodeId}
+          flowFocusRelatedIds={flowFocusRelatedIds}
+          onFlowNodeHoverEnter={setFlowHoverNodeId}
+          onFlowNodeHoverLeave={() => setFlowHoverNodeId(null)}
+          onFlowNodePinToggle={toggleFlowPin}
         />
       ) : (
         <TreeLevel
@@ -1559,12 +2116,19 @@ export function FlowChart() {
           onRemove={undefined}
           removeNode={removeNode}
           onSetSeparateAction={setSeparateAction}
+          flowFocusNodeId={flowFocusNodeId}
+          flowFocusRelatedIds={flowFocusRelatedIds}
+          onFlowNodeHoverEnter={setFlowHoverNodeId}
+          onFlowNodeHoverLeave={() => setFlowHoverNodeId(null)}
+          onFlowNodePinToggle={toggleFlowPin}
         />
       )}
-        </div>
-        </div>
-      </main>
-    </>
+            </div>
+          </div>
+        </main>
+        {storageStrip}
+      </div>
+    </div>
   );
 }
 
@@ -1589,6 +2153,13 @@ interface TreeLevelProps {
   onSetSeparateAction?: (action: (() => void) | null) => void;
   compactSlice?: boolean;
   onSeedStarter?: (tree: TreeNode) => void;
+  /** Focus node for upstream highlight (pinned click locks until unpinned; hover only when unpinned) */
+  flowFocusNodeId?: string | null;
+  flowFocusRelatedIds?: Set<string>;
+  onFlowNodeHoverEnter?: (treeNodeId: string) => void;
+  onFlowNodeHoverLeave?: () => void;
+  /** Click a machine card to pin its supply branch until cleared */
+  onFlowNodePinToggle?: (treeNodeId: string) => void;
 }
 
 function TreeLevel({
@@ -1609,6 +2180,11 @@ function TreeLevel({
   onRemove,
   removeNode,
   onSetSeparateAction,
+  flowFocusNodeId = null,
+  flowFocusRelatedIds = EMPTY_FLOW_RELATED_IDS,
+  onFlowNodeHoverEnter,
+  onFlowNodeHoverLeave,
+  onFlowNodePinToggle,
 }: TreeLevelProps) {
   const node = treeNode.node;
   const children = treeNode.children;
@@ -1645,7 +2221,7 @@ function TreeLevel({
             onChange={onUpdateBelt}
             beltCapacity={flowDataForBelt.beltCapacity}
             receivesInput={flowDataForBelt.receivesInput}
-            itemName={parentOutputItemKey ? getItemName(parentOutputItemKey) : ""}
+            itemName={parentOutputItemKey ? getItemName(parentOutputItemKey, "compact") : ""}
           />
         )}
         <FlowNodeCard
@@ -1666,6 +2242,15 @@ function TreeLevel({
             childCount={children.length}
             flowData={flowRates.get(treeNode.id)}
             onSetSeparateAction={onSetSeparateAction}
+            flowHighlightSelf={flowFocusNodeId === treeNode.id}
+            flowHighlightRelated={flowFocusRelatedIds.has(treeNode.id)}
+            onFlowHoverEnter={
+              onFlowNodeHoverEnter ? () => onFlowNodeHoverEnter(treeNode.id) : undefined
+            }
+            onFlowHoverLeave={onFlowNodeHoverLeave}
+            onFlowPinClick={
+              onFlowNodePinToggle ? () => onFlowNodePinToggle(treeNode.id) : undefined
+            }
           />
         {(() => {
           const fdr = flowRates.get(treeNode.id);
@@ -1755,7 +2340,7 @@ function TreeLevel({
                         </svg>
                         {children.length > 1 && (
                           <div className="mb-1 mt-1 text-xs text-zinc-500">
-                            {formatRate((child.node.inputPerMachine ?? 0) * child.node.count)} /min
+                            {formatRate((child.node.inputPerMachine ?? 0) * child.node.count)}/min
                           </div>
                         )}
                         <TreeLevel
@@ -1776,6 +2361,11 @@ function TreeLevel({
                           onRemove={() => removeNode(treeNode.id, child.id)}
                           removeNode={removeNode}
                           onSetSeparateAction={onSetSeparateAction}
+                          flowFocusNodeId={flowFocusNodeId}
+                          flowFocusRelatedIds={flowFocusRelatedIds}
+                          onFlowNodeHoverEnter={onFlowNodeHoverEnter}
+                          onFlowNodeHoverLeave={onFlowNodeHoverLeave}
+                          onFlowNodePinToggle={onFlowNodePinToggle}
                         />
                         </div>
                       </Fragment>
@@ -1819,12 +2409,12 @@ function TreeLevel({
 
       {overCapacity && (
         <p className="mt-2 text-sm text-amber-400">
-          Over capacity: needs {formatRate(totalDemand)} /min, supplying {formatRate(node.totalOutput)} /min
+          Over capacity: needs {formatRate(totalDemand)}/min, supplying {formatRate(node.totalOutput)}/min
         </p>
       )}
       {underCapacity && (
         <p className="mt-2 text-sm text-zinc-500">
-          Over-supplying: {formatRate(node.totalOutput)} /min available, {formatRate(totalDemand)} /min used
+          Over-supplying: {formatRate(node.totalOutput)}/min available, {formatRate(totalDemand)}/min used
         </p>
       )}
     </div>
@@ -1851,6 +2441,11 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
     removeNode,
     onSetSeparateAction,
     compactSlice = false,
+    flowFocusNodeId = null,
+    flowFocusRelatedIds = EMPTY_FLOW_RELATED_IDS,
+    onFlowNodeHoverEnter,
+    onFlowNodeHoverLeave,
+    onFlowNodePinToggle,
   } = props;
   const node = treeNode.node;
   const children = treeNode.children;
@@ -1931,6 +2526,15 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
         flowData={flowRates.get(treeNode.id)}
         fixedWidth
         onSetSeparateAction={onSetSeparateAction}
+        flowHighlightSelf={flowFocusNodeId === treeNode.id}
+        flowHighlightRelated={flowFocusRelatedIds.has(treeNode.id)}
+        onFlowHoverEnter={
+          onFlowNodeHoverEnter ? () => onFlowNodeHoverEnter(treeNode.id) : undefined
+        }
+        onFlowHoverLeave={onFlowNodeHoverLeave}
+        onFlowPinClick={
+          onFlowNodePinToggle ? () => onFlowNodePinToggle(treeNode.id) : undefined
+        }
       />
     </div>
   );
@@ -1988,7 +2592,7 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
             onChange={onUpdateBelt!}
             beltCapacity={flowDataForBelt.beltCapacity}
             receivesInput={flowDataForBelt.receivesInput}
-            itemName={getItemName(parentOutputItemKey!)}
+            itemName={getItemName(parentOutputItemKey!, "compact")}
             compact
             fullWidth
           />
@@ -2062,6 +2666,11 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
                     onRemove={() => removeNode(treeNode.id, children[0].id)}
                     removeNode={removeNode}
                     onSetSeparateAction={onSetSeparateAction}
+                    flowFocusNodeId={flowFocusNodeId}
+                    flowFocusRelatedIds={flowFocusRelatedIds}
+                    onFlowNodeHoverEnter={onFlowNodeHoverEnter}
+                    onFlowNodeHoverLeave={onFlowNodeHoverLeave}
+                    onFlowNodePinToggle={onFlowNodePinToggle}
                   />
                   <BranchingConnectorHorizontal />
                   <button
@@ -2099,7 +2708,7 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
                             onChange={() => {}}
                             beltCapacity={maxBeltCapacity}
                             receivesInput={summedReceives}
-                            itemName={getItemName(node.outputItemKey)}
+                            itemName={getItemName(node.outputItemKey, "compact")}
                             compact
                             fullWidth
                             readOnly
@@ -2128,6 +2737,11 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
                           removeNode={removeNode}
                           onSetSeparateAction={onSetSeparateAction}
                           compactSlice
+                          flowFocusNodeId={flowFocusNodeId}
+                          flowFocusRelatedIds={flowFocusRelatedIds}
+                          onFlowNodeHoverEnter={onFlowNodeHoverEnter}
+                          onFlowNodeHoverLeave={onFlowNodeHoverLeave}
+                          onFlowNodePinToggle={onFlowNodePinToggle}
                         />
                       </div>,
                       i < children.length - 1 ? (
@@ -2228,12 +2842,12 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
         <div className="shrink-0 text-sm">
           {overCapacity && (
             <p className="text-amber-400">
-              Over capacity: needs {formatRate(totalDemand)} /min, supplying {formatRate(node.totalOutput)} /min
+              Over capacity: needs {formatRate(totalDemand)}/min, supplying {formatRate(node.totalOutput)}/min
             </p>
           )}
           {underCapacity && (
             <p className="text-zinc-500">
-              Over-supplying: {formatRate(node.totalOutput)} /min available, {formatRate(totalDemand)} /min used
+              Over-supplying: {formatRate(node.totalOutput)}/min available, {formatRate(totalDemand)}/min used
             </p>
           )}
         </div>
@@ -2241,6 +2855,19 @@ function TreeLevelHorizontal(props: TreeLevelProps) {
     </div>
   );
 }
+
+/** One belt / input row above a machine in horizontal slice view */
+type SliceBeltRow = {
+  nodeId: string;
+  parentId: string;
+  itemKey: KeyName;
+  isInputEdge: boolean;
+  beltKey: string;
+  beltApplies: boolean;
+  isBeltLimited: boolean;
+  isUnderfed: boolean;
+  machineLabel: string;
+};
 
 /** Slice-based horizontal layout: columns with header/footer, branch-grouped machines, curved connectors */
 function TreeLevelSlices(props: TreeLevelProps) {
@@ -2255,6 +2882,11 @@ function TreeLevelSlices(props: TreeLevelProps) {
     onUpdateInputEdgeBelt,
     onMergeNodes,
     removeNode,
+    flowFocusNodeId = null,
+    flowFocusRelatedIds = EMPTY_FLOW_RELATED_IDS,
+    onFlowNodeHoverEnter,
+    onFlowNodeHoverLeave,
+    onFlowNodePinToggle,
   } = props;
 
   const [addMachineOpen, setAddMachineOpen] = useState(false);
@@ -2263,6 +2895,8 @@ function TreeLevelSlices(props: TreeLevelProps) {
   const [addMachineSliceIdx, setAddMachineSliceIdx] = useState(0);
   const [addMachinePrevSlice, setAddMachinePrevSlice] = useState<TreeNode[] | null>(null);
   const [addMachineAllPrevSlices, setAddMachineAllPrevSlices] = useState<TreeNode[][] | null>(null);
+  const [headerExpanded, setHeaderExpanded] = useState<Set<number>>(new Set());
+  const [outputExpanded, setOutputExpanded] = useState<Set<number>>(new Set());
 
   if (!tree.node.outputItemKey) {
     return (
@@ -2300,27 +2934,8 @@ function TreeLevelSlices(props: TreeLevelProps) {
     );
   }
 
-  const slices = getSlices(tree);
+  const slices = getFlowSlices(tree);
   const isEmpty = slices.length === 0;
-
-  function getSlices(t: TreeNode): TreeNode[][] {
-    if (!t.node.outputItemKey) return [];
-    const result: TreeNode[][] = [];
-    const rawChildren = t.children.filter((c) => c.node.isRaw);
-    const consumerChildren = t.children.filter((c) => !c.node.isRaw);
-    const level0 = [t, ...rawChildren];
-    let level: TreeNode[] = level0;
-    let nextLevel: TreeNode[] = [
-      ...consumerChildren,
-      ...rawChildren.flatMap((c) => c.children),
-    ];
-    while (level.length > 0) {
-      result.push(level);
-      level = nextLevel;
-      nextLevel = level.flatMap((n) => n.children);
-    }
-    return result;
-  }
 
   if (isEmpty) return null;
 
@@ -2354,27 +2969,13 @@ function TreeLevelSlices(props: TreeLevelProps) {
   };
 
   return (
-    <div className="flex flex-row items-stretch gap-0">
+    <div className="flex h-full min-h-full flex-row items-stretch gap-0">
       {slices.map((sliceNodes, sliceIdx) => {
         const prevSlice = sliceIdx > 0 ? slices[sliceIdx - 1]! : null;
         const parentOutputItemKey = prevSlice?.[0]?.node.outputItemKey;
         const hasInputs = sliceIdx > 0 && prevSlice && prevSlice.length > 0;
 
-        const inputsByItem = new Map<
-          KeyName,
-          {
-            rate: number;
-            consumers: Array<{
-              nodeId: string;
-              parentId: string;
-              itemKey: KeyName;
-              isInputEdge: boolean;
-              beltKey: string;
-              isBeltLimited: boolean;
-              machineLabel: string;
-            }>;
-          }
-        >();
+        const inputsByItem = new Map<KeyName, { rate: number; consumers: SliceBeltRow[] }>();
         if (hasInputs && sliceIdx > 0) {
           const allPrevSlices = slices.slice(0, sliceIdx);
           let totalRateByItem = new Map<KeyName, number>();
@@ -2420,15 +3021,20 @@ function TreeLevelSlices(props: TreeLevelProps) {
                 const receivesInput = inp?.receivesInput ?? 0;
                 const needsInput = inp?.needsInput ?? 0;
                 const isBeltLimited = beltCapacity > 0 && needsInput > 0 && receivesInput >= beltCapacity - 0.5 && receivesInput < needsInput - 0.5;
-                return {
+                const isUnderfed = needsInput > 0 && receivesInput < needsInput - 0.5;
+                const beltApplies = !!edge || fromParent;
+                const row: SliceBeltRow = {
                   nodeId: consumer.id,
                   parentId: edge ? "" : (consumer.parentId ?? ""),
                   itemKey,
                   isInputEdge: !!edge,
                   beltKey,
+                  beltApplies,
                   isBeltLimited,
-                  machineLabel: consumer.node.outputItemName,
+                  isUnderfed,
+                  machineLabel: getItemName(consumer.node.outputItemKey, "compact"),
                 };
+                return row;
               });
             if (consumers.length > 0) {
               inputsByItem.set(itemKey, { rate, consumers });
@@ -2445,66 +3051,93 @@ function TreeLevelSlices(props: TreeLevelProps) {
           }
         }
 
+        const allConsumers: SliceBeltRow[] = Array.from(inputsByItem.values()).flatMap(({ consumers }) => consumers);
+        const hasAnyRed = allConsumers.some((c) => c.isBeltLimited);
+        const hasAnyYellow = allConsumers.some((c) => c.isUnderfed && !c.isBeltLimited);
+        const isExpanded = headerExpanded.has(sliceIdx);
+        const hasMoreThanTwoLines = inputsByItem.size > 2;
+        const beltsByNodeId = new Map<string, SliceBeltRow[]>();
+        for (const c of allConsumers) {
+          const list = beltsByNodeId.get(c.nodeId) ?? [];
+          list.push(c);
+          beltsByNodeId.set(c.nodeId, list);
+        }
+
         return (
           <Fragment key={sliceIdx}>
-            <div className="relative flex min-w-[220px] max-w-[220px] flex-col border-x border-dashed border-zinc-600">
-              {/* Header: inputs + belt per product (per consumer when multiple use same input) */}
-              <div className="flex shrink-0 flex-col gap-1.5 border-b border-zinc-800 px-2 py-2">
-                {Array.from(inputsByItem.entries()).map(([itemKey, { rate, consumers }]) =>
-                  consumers.length === 0 ? (
-                    <div key={itemKey} className="flex items-center rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
-                      <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey)}</span>
-                      <span className="ml-auto text-zinc-500">+ to use</span>
-                    </div>
+            <div className="relative flex min-h-full min-w-[220px] max-w-[220px] flex-col overflow-visible border-x border-dashed border-zinc-600">
+              {/* Header: inputs + belt per product - fixed height, expand shows overlay */}
+              <div
+                className={`relative flex shrink-0 flex-col overflow-visible border-b transition ${
+                  hasAnyRed ? "border-red-500/60 bg-red-950/20" : hasAnyYellow ? "border-amber-500/50 bg-amber-950/20" : "border-zinc-800"
+                }`}
+              >
+                <div className="flex h-6 shrink-0 w-full items-center justify-center gap-1 text-xs text-zinc-500">
+                  {hasMoreThanTwoLines ? (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setHeaderExpanded((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(sliceIdx)) next.delete(sliceIdx);
+                          else next.add(sliceIdx);
+                          return next;
+                        })
+                      }
+                      className="flex items-center justify-center gap-1 transition hover:text-zinc-300"
+                    >
+                      <span>INPUT</span>
+                      <svg className={`h-3 w-3 ${isExpanded ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
                   ) : (
-                    <div key={itemKey} className="flex flex-col gap-1">
-                      <div className="rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
-                        <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey)}</span>
+                    <span>INPUT</span>
+                  )}
+                </div>
+                <div className="h-[5.5rem] overflow-hidden px-2 py-2">
+                  {hasMoreThanTwoLines && isExpanded ? (
+                    <div className="h-full" aria-hidden />
+                  ) : (
+                  <div className={`flex h-full flex-col gap-1.5 overflow-hidden ${hasMoreThanTwoLines ? "max-h-full" : ""}`}>
+                  {/* Amounts only (rate + item name) - belt selectors are on machine cards */}
+                  {Array.from(inputsByItem.entries()).map(([itemKey, { rate, consumers }]) =>
+                    consumers.length === 0 ? (
+                      <div key={itemKey} className="flex items-center rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
+                        <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey, "compact")}</span>
+                        <span className="ml-auto text-zinc-500">+ to use</span>
                       </div>
-                      {consumers.map(({ nodeId, parentId, itemKey, isInputEdge, beltKey, isBeltLimited, machineLabel }) => (
-                        <div
-                          key={nodeId}
-                          className={`flex items-center gap-2 rounded-lg border px-2 py-1 text-xs transition hover:border-zinc-600 ${
-                            isBeltLimited ? "border-red-500/60 bg-red-950/30" : "border-zinc-700 bg-zinc-800/80"
-                          }`}
-                        >
-                          <span
-                            className="min-w-0 truncate text-zinc-400"
-                            title={machineLabel}
-                          >
-                            → {machineLabel}
-                          </span>
-                          <select
-                            value={beltKey}
-                            onChange={(e) =>
-                              isInputEdge && onUpdateInputEdgeBelt
-                                ? onUpdateInputEdgeBelt(nodeId, itemKey, e.target.value)
-                                : onUpdateChildBelt(parentId, nodeId, e.target.value)
-                            }
-                            className={`ml-auto flex shrink-0 cursor-pointer appearance-none border-none bg-transparent py-0 pr-5 text-right focus:outline-none focus:ring-0 ${
-                              isBeltLimited ? "text-red-400" : "text-zinc-400"
-                            }`}
-                            title={`Belt for ${machineLabel}${isBeltLimited ? " (limiting flow)" : ""}`}
-                            style={{
-                              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23717171'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E")`,
-                              backgroundRepeat: "no-repeat",
-                              backgroundPosition: "right 0 center",
-                              backgroundSize: "1rem",
-                            }}
-                          >
-                            {BELTS.map((b) => (
-                              <option key={b.key_name} value={b.key_name}>
-                                {formatRate(b.rate)}/min
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      ))}
-                    </div>
-                  )
-                )}
+                    ) : (
+                      <div key={`amt-${itemKey}`} className="rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
+                        <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey, "compact")}</span>
+                      </div>
+                    )
+                  )}
                 {inputsByItem.size === 0 && sliceIdx === 0 && (
                   <div className="py-1 text-xs text-zinc-500">Input (raw)</div>
+                )}
+                </div>
+                  )}
+                </div>
+                {hasMoreThanTwoLines && isExpanded && (
+                  <div
+                    className={`absolute left-0 right-0 top-8 z-50 flex max-h-[85vh] flex-col gap-1.5 overflow-y-auto border border-zinc-700 bg-zinc-900 p-2 shadow-xl ${
+                      hasAnyRed ? "border-t-red-500/60" : hasAnyYellow ? "border-t-amber-500/50" : "border-t-zinc-800"
+                    }`}
+                  >
+                    {Array.from(inputsByItem.entries()).map(([itemKey, { rate, consumers }]) =>
+                      consumers.length === 0 ? (
+                        <div key={itemKey} className="flex items-center rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
+                          <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey, "compact")}</span>
+                          <span className="ml-auto text-zinc-500">+ to use</span>
+                        </div>
+                      ) : (
+                        <div key={`amt-ex-${itemKey}`} className="rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
+                          <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey, "compact")}</span>
+                        </div>
+                      )
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -2576,7 +3209,70 @@ function TreeLevelSlices(props: TreeLevelProps) {
                         </button>
                       </div>
                     ) : null,
-                    <div key={node.id} className="flex shrink-0 justify-center">
+                    <div key={node.id} className="flex shrink-0 flex-col items-center gap-2">
+                      {(() => {
+                        const beltsForNode = beltsByNodeId.get(node.id) ?? [];
+                        if (beltsForNode.length === 0) return null;
+                        return (
+                          <div className="flex w-[200px] flex-col gap-0.5 rounded-lg border border-zinc-700 bg-zinc-800/90 px-2 py-1">
+                            {beltsForNode.map(
+                              ({
+                                nodeId,
+                                parentId,
+                                itemKey: ik,
+                                isInputEdge,
+                                beltKey,
+                                beltApplies,
+                                isBeltLimited,
+                                isUnderfed,
+                              }) => (
+                              <div
+                                key={`${nodeId}-${ik}`}
+                                className={`flex items-center justify-between gap-2 text-xs ${
+                                  isBeltLimited ? "text-red-400" : isUnderfed ? "text-amber-400" : "text-zinc-300"
+                                }`}
+                              >
+                                <span className="min-w-0 truncate">{getItemName(ik, "compact")}</span>
+                                {beltApplies ? (
+                                <select
+                                  value={beltKey}
+                                  onChange={(e) =>
+                                    isInputEdge && onUpdateInputEdgeBelt
+                                      ? onUpdateInputEdgeBelt(nodeId, ik, e.target.value)
+                                      : onUpdateChildBelt(parentId, nodeId, e.target.value)
+                                  }
+                                  onClick={(e) => e.stopPropagation()}
+                                  className={`flex shrink-0 cursor-pointer appearance-none border-none bg-transparent py-0 pr-5 text-right focus:outline-none focus:ring-0 ${
+                                    isBeltLimited ? "text-red-400" : isUnderfed ? "text-amber-400" : "text-zinc-400"
+                                  }`}
+                                  title={isBeltLimited ? "Limiting flow" : ""}
+                                  style={{
+                                    backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%23717171'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E")`,
+                                    backgroundRepeat: "no-repeat",
+                                    backgroundPosition: "right 0 center",
+                                    backgroundSize: "1rem",
+                                  }}
+                                >
+                                  {BELTS.map((b) => (
+                                    <option key={b.key_name} value={b.key_name}>
+                                      {formatRate(b.rate)}/min
+                                    </option>
+                                  ))}
+                                </select>
+                                ) : (
+                                  <span
+                                    className="shrink-0 text-right text-zinc-500"
+                                    title="Same-column pool; not a dedicated belt in the model"
+                                  >
+                                    Pool
+                                  </span>
+                                )}
+                              </div>
+                            )
+                            )}
+                          </div>
+                        );
+                      })()}
                       <FlowNodeCard
                         node={node.node}
                         machineOptions={opts}
@@ -2590,6 +3286,15 @@ function TreeLevelSlices(props: TreeLevelProps) {
                         childCount={node.children.length}
                         flowData={flowRates.get(node.id)}
                         fixedWidth
+                        flowHighlightSelf={flowFocusNodeId === node.id}
+                        flowHighlightRelated={flowFocusRelatedIds.has(node.id)}
+                        onFlowHoverEnter={
+                          onFlowNodeHoverEnter ? () => onFlowNodeHoverEnter(node.id) : undefined
+                        }
+                        onFlowHoverLeave={onFlowNodeHoverLeave}
+                        onFlowPinClick={
+                          onFlowNodePinToggle ? () => onFlowNodePinToggle(node.id) : undefined
+                        }
                       />
                     </div>,
                   ].filter(Boolean);
@@ -2619,13 +3324,67 @@ function TreeLevelSlices(props: TreeLevelProps) {
                 </button>
               </div>
 
-              {/* Footer: outputs stacked */}
-              <div className="shrink-0 border-t border-zinc-800 px-2 py-2">
-                {Array.from(outputsByItem.entries()).map(([itemKey, rate]) => (
-                  <div key={itemKey} className="py-0.5 text-xs font-medium text-zinc-400">
-                    {formatRate(rate)} {getItemName(itemKey)}
-                  </div>
-                ))}
+              {/* Footer: outputs stacked - fixed height, expand shows overlay */}
+              <div className="relative flex shrink-0 flex-col overflow-visible border-t border-zinc-800">
+                {outputsByItem.size > 0 && (
+                  <>
+                    <div className="flex h-6 shrink-0 w-full items-center justify-center gap-1 text-xs text-zinc-500">
+                      {outputsByItem.size > 2 ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setOutputExpanded((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(sliceIdx)) next.delete(sliceIdx);
+                              else next.add(sliceIdx);
+                              return next;
+                            })
+                          }
+                          className="flex items-center justify-center gap-1 transition hover:text-zinc-300"
+                        >
+                          <span>OUTPUT</span>
+                          <svg className={`h-3 w-3 ${outputExpanded.has(sliceIdx) ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                      ) : (
+                        <span>OUTPUT</span>
+                      )}
+                    </div>
+                    <div className="h-[5.5rem] overflow-hidden px-2 py-2">
+                      {outputsByItem.size > 2 && outputExpanded.has(sliceIdx) ? (
+                        <div className="h-full" aria-hidden />
+                      ) : (
+                    <div className={`flex h-full flex-col gap-1.5 overflow-hidden ${outputsByItem.size > 2 ? "max-h-full" : ""}`}>
+                      {Array.from(outputsByItem.entries()).map(([itemKey, rate]) => (
+                        <div key={itemKey} className="rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
+                          <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey, "compact")}</span>
+                        </div>
+                      ))}
+                    </div>
+                      )}
+                    </div>
+                    {outputsByItem.size > 2 && outputExpanded.has(sliceIdx) && (
+                      <div className="absolute bottom-0 left-0 right-0 z-50 flex min-h-[5.5rem] max-h-[85vh] flex-col gap-1.5 overflow-y-auto border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
+                        <button
+                          type="button"
+                          onClick={() => setOutputExpanded((prev) => { const next = new Set(prev); next.delete(sliceIdx); return next; })}
+                          className="flex w-full items-center justify-center gap-1 py-0.5 text-xs text-zinc-500 transition hover:text-zinc-300"
+                        >
+                          <span>OUTPUT</span>
+                          <svg className="h-3 w-3 rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                          </svg>
+                        </button>
+                        {Array.from(outputsByItem.entries()).map(([itemKey, rate]) => (
+                          <div key={itemKey} className="rounded-lg border border-zinc-700 bg-zinc-800/80 px-2 py-1.5 text-xs">
+                            <span className="font-medium text-amber-400">{formatRate(rate)} {getItemName(itemKey, "compact")}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             </div>
           </Fragment>
@@ -2689,6 +3448,16 @@ function TreeLevelSlices(props: TreeLevelProps) {
   );
 }
 
+function flowHoverHighlightClass(flowHighlightSelf: boolean, flowHighlightRelated: boolean): string {
+  if (flowHighlightSelf) {
+    return "ring-2 ring-amber-400 ring-offset-2 ring-offset-zinc-950 z-[5]";
+  }
+  if (flowHighlightRelated) {
+    return "ring-2 ring-sky-500/70 ring-offset-2 ring-offset-zinc-950 bg-sky-950/25 z-[1]";
+  }
+  return "";
+}
+
 interface FlowNodeCardProps {
   node: FlowNode;
   machineOptions: MachineOption[];
@@ -2705,6 +3474,12 @@ interface FlowNodeCardProps {
   flowData?: FlowRateData | { parentSending: number };
   compact?: boolean;
   fixedWidth?: boolean;
+  flowHighlightSelf?: boolean;
+  flowHighlightRelated?: boolean;
+  onFlowHoverEnter?: () => void;
+  onFlowHoverLeave?: () => void;
+  /** Pin upstream branch highlight (toggle) */
+  onFlowPinClick?: () => void;
 }
 
 function FlowNodeCard({
@@ -2723,6 +3498,11 @@ function FlowNodeCard({
   flowData,
   compact: compactProp = true,
   fixedWidth = false,
+  flowHighlightSelf = false,
+  flowHighlightRelated = false,
+  onFlowHoverEnter,
+  onFlowHoverLeave,
+  onFlowPinClick,
 }: FlowNodeCardProps) {
   const widthClass = fixedWidth ? "min-w-[200px] w-[200px] shrink-0" : "w-fit shrink-0";
   const sortedProduces = sortOptionsNonAltFirst(producesOptions);
@@ -2740,32 +3520,57 @@ function FlowNodeCard({
     "utilization" in flowData &&
     (flowData as FlowRateData).utilization < 1;
 
+  const nameDensity: ItemDisplayDensity = isCompact ? "compact" : "comfortable";
+  const displayProductName = getItemName(node.outputItemKey, nameDensity);
+  const recipeNameAbbrev = node.recipeName ? abbreviateItemDisplayName(node.recipeName, nameDensity) : "";
+  const showRecipeSubtitle = Boolean(recipeNameAbbrev && recipeNameAbbrev !== displayProductName);
+
+  const shardsPerMachine = powerShardsForClockPercent(node.clockPercent);
+  const totalPowerShards = shardsPerMachine * node.count;
+  const SHARD_DOT_CAP = 8;
+  const shardDotsToRender = Math.min(totalPowerShards, SHARD_DOT_CAP);
+  const shardDotsOverflow = totalPowerShards > SHARD_DOT_CAP ? totalPowerShards - SHARD_DOT_CAP : 0;
+
   const compactView = (
     <div
-      onClick={() => onSetSeparateAction?.(onSeparate ?? null)}
+      data-flow-node-card
+      onClick={() => {
+        onSetSeparateAction?.(onSeparate ?? null);
+        onFlowPinClick?.();
+      }}
+      onMouseEnter={onFlowHoverEnter}
+      onMouseLeave={onFlowHoverLeave}
       className={`
         flex flex-col gap-1 rounded-lg border-2 bg-zinc-900/90 px-3 py-2 shadow transition-all
         hover:border-zinc-600
         ${widthClass}
+        ${flowHoverHighlightClass(flowHighlightSelf, flowHighlightRelated)}
         ${isOpen ? "border-amber-500/60" : isUnderfed ? "border-amber-500/50 !bg-amber-900/30" : "border-zinc-800"}
       `}
     >
-      <div className="text-sm font-medium text-zinc-100">{node.count} {node.buildingName}</div>
-      {hasFullFlowData && (flowData as FlowRateData).inputs && (flowData as FlowRateData).inputs!.length > 0 && (
-        <div className="flex flex-col gap-0.5 text-xs">
-          {(flowData as FlowRateData).inputs!.map((r) => {
-            const isBottlenecked = r.receivesInput < r.needsInput - 0.5;
-            return (
-              <div key={r.itemKey} className="flex justify-between font-mono">
-                <span className="text-zinc-500">{r.itemName}</span>
-                <span className={isBottlenecked ? "text-amber-400" : "text-zinc-300"}>
-                  {formatRate(r.receivesInput)}/{formatRate(r.needsInput)}/min
-                </span>
-              </div>
-            );
-          })}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 text-sm font-medium text-zinc-100">
+          {node.count} {node.buildingName}
         </div>
-      )}
+        {totalPowerShards > 0 && (
+          <div
+            className="flex max-w-[3.25rem] shrink-0 flex-wrap justify-end gap-0.5 pt-px"
+            title={`${totalPowerShards} power shard${totalPowerShards !== 1 ? "s" : ""} (${node.count} machine${node.count !== 1 ? "s" : ""} × ${shardsPerMachine} shard${shardsPerMachine !== 1 ? "s" : ""} each @ ${node.clockPercent}%)`}
+            aria-label={`${totalPowerShards} power shards`}
+          >
+            {Array.from({ length: shardDotsToRender }, (_, i) => (
+              <span
+                key={i}
+                className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400 shadow-[0_0_3px_rgba(56,189,248,0.55)]"
+                aria-hidden
+              />
+            ))}
+            {shardDotsOverflow > 0 && (
+              <span className="text-[9px] font-semibold leading-none text-sky-400">+{shardDotsOverflow}</span>
+            )}
+          </div>
+        )}
+      </div>
       <div className="flex items-center justify-between gap-2 text-xs">
         {producesOptions.length > 0 ? (
           <button
@@ -2778,23 +3583,46 @@ function FlowNodeCard({
                 setEditModalOpen(true);
               }
             }}
-            className="min-w-0 truncate text-left text-amber-400 transition hover:text-amber-300 hover:underline"
-            title={`${node.outputItemName} – Change product`}
+            className="min-w-0 truncate text-left text-base font-semibold text-teal-300 transition hover:text-teal-200 hover:underline"
+            title={`${displayProductName} – Change product`}
           >
-            {node.outputItemName}
+            {displayProductName}
           </button>
         ) : (
-          <span className="min-w-0 truncate text-amber-400" title={node.outputItemName}>
-            {node.outputItemName}
+          <span className="min-w-0 truncate text-base font-semibold text-teal-300" title={displayProductName}>
+            {displayProductName}
           </span>
         )}
-        <span className="shrink-0 font-mono text-zinc-100">
+        <span
+          className={`shrink-0 font-mono ${
+            hasFullFlowData && "currentOutput" in flowData
+              ? (flowData as FlowRateData).currentOutput >= (flowData as FlowRateData).maxOutput - 0.5
+                ? "text-green-400"
+                : "text-zinc-100"
+              : "text-zinc-100"
+          }`}
+        >
           {hasFullFlowData && "currentOutput" in flowData
-            ? `${formatRate((flowData as FlowRateData).currentOutput)}/${formatRate((flowData as FlowRateData).maxOutput)}`
-            : formatRate(node.totalOutput)}
-          /min
+            ? `${formatRate((flowData as FlowRateData).currentOutput)}/${formatRate((flowData as FlowRateData).maxOutput)}/min`
+            : `${formatRate(node.totalOutput)}/min`}
         </span>
       </div>
+      {hasFullFlowData && (flowData as FlowRateData).inputs && (flowData as FlowRateData).inputs!.length > 0 && (
+        <div className="flex flex-col gap-0.5 text-xs">
+          {(flowData as FlowRateData).inputs!.map((r) => {
+            const isBottlenecked = r.receivesInput < r.needsInput - 0.5;
+            const inputLineLabel = getItemName(r.itemKey, nameDensity);
+            return (
+              <div key={r.itemKey} className="flex justify-between font-mono">
+                <span className={isBottlenecked ? "text-amber-400" : "text-zinc-500"}>{inputLineLabel}</span>
+                <span className={isBottlenecked ? "text-amber-400" : "text-zinc-300"}>
+                  {formatRate(r.receivesInput)}/{formatRate(r.needsInput)}/min
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div className="mt-0.5 flex items-center justify-between gap-1">
         <div className="flex shrink-0 gap-1">
           <button
@@ -2833,7 +3661,7 @@ function FlowNodeCard({
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); setEditModalOpen(true); }}
-            className="rounded p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-amber-400"
+            className="rounded p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-teal-400"
             title="Edit"
           >
             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2851,7 +3679,11 @@ function FlowNodeCard({
             </svg>
           </button>
         </div>
-        <span className="shrink-0 text-zinc-500">{node.clockPercent}%</span>
+        <DraggablePercent
+          value={node.clockPercent}
+          onChange={(v) => onUpdate({ clockPercent: v })}
+          className="shrink-0 rounded px-1 py-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+        />
       </div>
     </div>
   );
@@ -2911,7 +3743,7 @@ function FlowNodeCard({
                     >
                       <div className="text-sm font-medium">{getItemName(opt.outputItemKey)}</div>
                       <div className="text-xs text-zinc-500">
-                        {formatRate(opt.outputPerMachine)} /min
+                        {formatRate(opt.outputPerMachine)}/min
                       </div>
                       {getInputSlots(opt.buildingKey) > 0 && (
                         <div className="mt-0.5 text-xs text-zinc-500">{getInputSlots(opt.buildingKey)} input{getInputSlots(opt.buildingKey) !== 1 ? "s" : ""}</div>
@@ -2929,11 +3761,18 @@ function FlowNodeCard({
 
   return (
     <div
-      onClick={() => onSetSeparateAction?.(onSeparate ?? null)}
+      data-flow-node-card
+      onClick={() => {
+        onSetSeparateAction?.(onSeparate ?? null);
+        onFlowPinClick?.();
+      }}
+      onMouseEnter={onFlowHoverEnter}
+      onMouseLeave={onFlowHoverLeave}
       className={`
         flex flex-col gap-3 rounded-xl border-2 bg-zinc-900/90 p-4 shadow-lg transition-all
         hover:border-zinc-600
         ${widthClass}
+        ${flowHoverHighlightClass(flowHighlightSelf, flowHighlightRelated)}
         ${isOpen ? "border-amber-500/60 ring-2 ring-amber-500/20" : isUnderfed ? "border-amber-500/50 !bg-amber-900/30" : "border-zinc-800"}
       `}
     >
@@ -2957,11 +3796,11 @@ function FlowNodeCard({
                         setProducesOpen(!producesOpen);
                       }
                     }}
-                    className="w-full text-left text-base font-medium text-amber-400 transition hover:text-amber-300"
+                    className="w-full text-left text-base font-semibold text-teal-300 transition hover:text-teal-200"
                   >
-                    {node.outputItemName}
-                    {node.recipeName && node.recipeName !== node.outputItemName && (
-                      <span className="ml-1 text-sm text-zinc-500">({node.recipeName})</span>
+                    {displayProductName}
+                    {showRecipeSubtitle && (
+                      <span className="ml-1 text-sm text-zinc-500">({recipeNameAbbrev})</span>
                     )}
                     <span className="ml-1 text-xs text-zinc-500">▼</span>
                   </button>
@@ -2984,7 +3823,7 @@ function FlowNodeCard({
                   )}
                 </div>
               ) : (
-                <div className="mt-0.5 text-sm text-zinc-500">{node.outputItemName}</div>
+                <div className="mt-0.5 text-sm font-semibold text-teal-300">{displayProductName}</div>
               )}
             </div>
           </div>
@@ -3008,7 +3847,7 @@ function FlowNodeCard({
               >
                 <span className="font-medium">{opt.recipeName}</span>
                 <span className="ml-2 text-zinc-500">
-                  {formatRate(opt.outputPerMachine)} /min
+                  {formatRate(opt.outputPerMachine)}/min
                 </span>
                 {getInputSlots(opt.buildingKey) > 0 && (
                   <span className="ml-2 text-xs text-zinc-500">· {getInputSlots(opt.buildingKey)} input{getInputSlots(opt.buildingKey) !== 1 ? "s" : ""}</span>
@@ -3024,19 +3863,11 @@ function FlowNodeCard({
           className="flex items-center gap-1"
           onClick={(e) => e.stopPropagation()}
         >
-          <input
-            type="number"
-            min={1}
-            max={250}
+          <DraggablePercent
             value={node.clockPercent}
-            onChange={(e) =>
-              onUpdate({
-                clockPercent: Math.min(250, Math.max(1, parseInt(e.target.value, 10) || 100)),
-              })
-            }
-            className="w-14 rounded border border-zinc-600 bg-zinc-800 px-2 py-0.5 text-center text-xs text-zinc-100"
+            onChange={(v) => onUpdate({ clockPercent: v })}
+            className="rounded border border-zinc-600 bg-zinc-800 px-3 py-1 text-center text-xs text-zinc-100"
           />
-          <span className="text-xs text-zinc-500">%</span>
         </div>
         <div className="text-xs font-medium uppercase tracking-wider text-zinc-500">
           {node.isRaw ? "Output" : "Input"}
@@ -3044,30 +3875,35 @@ function FlowNodeCard({
         {hasFullFlowData ? (
           (() => {
             const f = flowData as FlowRateData;
-            const rows = f.inputs && f.inputs.length > 0
-              ? f.inputs
-              : [{ itemName: "Input", needsInput: f.needsInput, receivesInput: f.receivesInput }];
+            const rows: (FlowInputData | { itemName: string; needsInput: number; receivesInput: number })[] =
+              f.inputs && f.inputs.length > 0
+                ? f.inputs
+                : [{ itemName: "Input", needsInput: f.needsInput, receivesInput: f.receivesInput }];
             return (
               <div className="space-y-1.5 text-sm font-mono">
                 {rows.map((r) => {
                   const isBottlenecked = r.receivesInput < r.needsInput;
                   const missing = r.needsInput - r.receivesInput;
+                  const inputLabel =
+                    "itemKey" in r && r.itemKey
+                      ? getItemName(r.itemKey, "comfortable")
+                      : r.itemName;
                   return (
-                    <div key={r.itemName}>
+                    <div key={"itemKey" in r && r.itemKey ? r.itemKey : r.itemName}>
                       <div className="flex justify-between">
-                        <span className="text-zinc-400">{r.itemName}</span>
-                        <span>
-                          <span className={isBottlenecked ? "text-amber-400" : "text-emerald-400"}>
+                        <span className={isBottlenecked ? "text-amber-400" : "text-zinc-400"}>{inputLabel}</span>
+                        <span className={isBottlenecked ? "text-amber-400" : ""}>
+                          <span className={isBottlenecked ? "" : "text-emerald-400"}>
                             {formatRate(r.receivesInput)}
                           </span>
-                          <span className="text-zinc-500"> / </span>
-                          <span>{formatRate(r.needsInput)} /min</span>
+                          <span className={isBottlenecked ? "text-amber-500/80" : "text-zinc-500"}> / </span>
+                          <span className={isBottlenecked ? "" : "text-zinc-300"}>{formatRate(r.needsInput)}/min</span>
                         </span>
                       </div>
                       {isBottlenecked && missing > 0 && (
                         <div className="flex justify-between text-xs text-amber-400">
                           <span className="text-zinc-500">Missing</span>
-                          <span>{formatRate(missing)} /min</span>
+                          <span>{formatRate(missing)}/min</span>
                         </div>
                       )}
                     </div>
@@ -3080,24 +3916,24 @@ function FlowNodeCard({
           <div className="space-y-1.5 text-sm font-mono">
             <div className="flex justify-between">
               <span className="text-zinc-400">Output</span>
-              <span className="text-amber-400">{formatRate((flowData as { parentSending: number })?.parentSending ?? node.totalOutput)} /min</span>
+              <span className="text-amber-400">{formatRate((flowData as { parentSending: number })?.parentSending ?? node.totalOutput)}/min</span>
             </div>
             {!node.isRaw && node.inputPerMachine != null && (
               <div className="flex justify-between text-zinc-500">
                 <span>Input</span>
-                <span>{formatRate(allocatedInput)} /min</span>
+                <span>{formatRate(allocatedInput)}/min</span>
               </div>
             )}
             {childCount > 0 && (
               <>
                 <div className="flex justify-between text-zinc-500">
                   <span>→ to {childCount} machine{childCount !== 1 ? "s" : ""}</span>
-                  <span>{formatRate(totalDemand)} /min</span>
+                  <span>{formatRate(totalDemand)}/min</span>
                 </div>
                 {node.totalOutput > totalDemand && (
                   <div className="flex justify-between">
                     <span className="text-zinc-400">Extra</span>
-                    <span className="text-amber-400">{formatRate(node.totalOutput - totalDemand)} /min</span>
+                    <span className="text-amber-400">{formatRate(node.totalOutput - totalDemand)}/min</span>
                   </div>
                 )}
               </>
@@ -3145,7 +3981,7 @@ function FlowNodeCard({
                         >
                           <div className="text-sm font-medium">{getItemName(opt.outputItemKey)}</div>
                           <div className="text-xs text-zinc-500">
-                            {formatRate(opt.outputPerMachine)} /min
+                            {formatRate(opt.outputPerMachine)}/min
                           </div>
                           {getInputSlots(opt.buildingKey) > 0 && (
                             <div className="mt-0.5 text-xs text-zinc-500">{getInputSlots(opt.buildingKey)} input{getInputSlots(opt.buildingKey) !== 1 ? "s" : ""}</div>
