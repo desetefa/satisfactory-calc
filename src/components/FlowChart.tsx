@@ -29,6 +29,22 @@ import {
   getItemDisplayName,
   type ItemDisplayDensity,
 } from "@/lib/itemDisplayName";
+import { QuickBuildFab, QuickBuildModal } from "@/components/QuickBuildModal";
+import {
+  type NodePurity,
+  type FlowNode,
+  type InputEdge,
+  type TreeNode,
+  createFlowNode,
+  createTreeNode,
+  getEffectiveOutputPerMachine,
+} from "@/lib/flowChartModel";
+import { planProductionFromTarget } from "@/lib/productionPlanner";
+import { productionPlanToSliceTree } from "@/lib/plannerToTree";
+
+export type { NodePurity, FlowNode, InputEdge, TreeNode } from "@/lib/flowChartModel";
+
+const createNode = createFlowNode;
 
 function getItemName(key: string, density: ItemDisplayDensity = "comfortable"): string {
   return getItemDisplayName(key, density);
@@ -884,93 +900,6 @@ function EditNodeModal({
   );
 }
 
-export type NodePurity = "impure" | "normal" | "pure";
-
-const PURITY_MULTIPLIER: Record<NodePurity, number> = {
-  impure: 0.5,
-  normal: 1,
-  pure: 2,
-};
-
-function getEffectiveOutputPerMachine(node: FlowNode): number {
-  const mult = node.isRaw ? PURITY_MULTIPLIER[node.nodePurity ?? "normal"] : 1;
-  return node.outputPerMachine * mult;
-}
-
-export interface FlowNode {
-  id: string;
-  outputItemKey: KeyName;
-  outputItemName: string;
-  buildingKey: string;
-  buildingName: string;
-  recipeKey?: string;
-  recipeName?: string;
-  outputPerMachine: number;
-  inputPerMachine?: number;
-  count: number;
-  clockPercent: number;
-  totalOutput: number;
-  isRaw: boolean;
-  /** Mineral node purity (extractors only): impure 0.5x, normal 1x, pure 2x */
-  nodePurity?: NodePurity;
-}
-
-/** Extra input source when a machine needs an item from a producer that's not its parent */
-export interface InputEdge {
-  itemKey: KeyName;
-  producerId: string;
-  beltKey: string;
-}
-
-export interface TreeNode {
-  id: string;
-  node: FlowNode;
-  children: TreeNode[];
-  parentId: string | null;
-  /** Belt tier for the connection from parent to this node (items/min) */
-  incomingBeltKey?: string;
-  /** For multi-input recipes: inputs from producers other than parent (e.g. Iron Plate for Reinforced Iron Plate) */
-  inputEdges?: InputEdge[];
-}
-
-function createNode(
-  outputItemKey: KeyName,
-  buildingKey: string,
-  buildingName: string,
-  outputPerMachine: number,
-  count: number,
-  clockPercent: number,
-  options: { recipeKey?: string; recipeName?: string; inputPerMachine?: number; isRaw?: boolean; nodePurity?: NodePurity }
-): FlowNode {
-  const purityMult = PURITY_MULTIPLIER[options.nodePurity ?? "normal"];
-  const effectiveRate = outputPerMachine * purityMult * (clockPercent / 100) * count;
-  return {
-    id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
-    outputItemKey,
-    outputItemName: getItemName(outputItemKey),
-    buildingKey,
-    buildingName,
-    recipeKey: options.recipeKey,
-    recipeName: options.recipeName,
-    outputPerMachine,
-    inputPerMachine: options.inputPerMachine,
-    count,
-    clockPercent,
-    totalOutput: effectiveRate,
-    isRaw: options.isRaw ?? false,
-    nodePurity: options.nodePurity ?? "normal",
-  };
-}
-
-function createTreeNode(
-  node: FlowNode,
-  parentId: string | null,
-  children: TreeNode[] = [],
-  incomingBeltKey = "belt1"
-): TreeNode {
-  return { id: node.id, node, children, parentId, incomingBeltKey };
-}
-
 function pickDefaultBelt(throughput: number): string {
   const belts = getAllBelts().sort((a, b) => a.rate - b.rate);
   const match = belts.find((b) => b.rate >= throughput);
@@ -982,114 +911,82 @@ function getAllLeaves(tree: TreeNode): TreeNode[] {
   return tree.children.flatMap((c) => getAllLeaves(c));
 }
 
-type FinalOutput = { itemKey: KeyName; itemName: string; rate: number };
+type StorageStripRow = {
+  itemKey: KeyName;
+  itemName: string;
+  surplusRate: number;
+  reservePerMin: number;
+};
 
-function computeFinalOutputs(
-  tree: TreeNode,
-  flowRates: Map<string, FlowRateData | { parentSending: number }>
-): FinalOutput[] {
-  const produced = new Map<KeyName, number>();
-  const consumed = new Map<KeyName, number>();
-  const usedItems = new Set<KeyName>();
-  const itemOrder: KeyName[] = [];
-
-  function pushItemKey(key: KeyName) {
-    usedItems.add(key);
-    if (!itemOrder.includes(key)) itemOrder.push(key);
-  }
-
-  /**
-   * Surplus = total produced − total consumed (globally in the flow), not tree-edge primary belt only.
-   * `FlowRateData.receivesInput` is only the ingredient that matches the *tree* parent output; multi-input
-   * machines (e.g. RIP) show real intake on `inputs[]`. Summing `inputs[].receivesInput` per item matches the sim.
-   */
-  for (const t of getAllNodes(tree)) {
-    if (!t.node.outputItemKey) continue;
-    const outKey = t.node.outputItemKey;
-    pushItemKey(outKey);
-
-    const fd = flowRates.get(t.id);
-    let outputRate: number;
-    if (fd && "currentOutput" in fd) {
-      outputRate = (fd as FlowRateData).currentOutput;
-    } else if (fd && "parentSending" in fd) {
-      outputRate = (fd as { parentSending: number }).parentSending;
-    } else {
-      outputRate =
-        getEffectiveOutputPerMachine(t.node) * (t.node.clockPercent / 100) * t.node.count;
-    }
-    produced.set(outKey, (produced.get(outKey) ?? 0) + outputRate);
-
-    if (t.node.recipeKey) {
-      for (const { itemKey } of getRecipeInputsPerMinute(t.node.recipeKey)) {
-        pushItemKey(itemKey);
-      }
-    }
-    for (const edge of t.inputEdges ?? []) {
-      pushItemKey(edge.itemKey);
-    }
-
-    if (t.node.isRaw || !t.node.recipeKey) continue;
-
-    const cfd = flowRates.get(t.id) as FlowRateData | undefined;
-    if (!cfd || !("needsInput" in cfd)) continue;
-
-    if (cfd.inputs && cfd.inputs.length > 0) {
-      for (const inp of cfd.inputs) {
-        pushItemKey(inp.itemKey);
-        consumed.set(inp.itemKey, (consumed.get(inp.itemKey) ?? 0) + inp.receivesInput);
-      }
-    } else if (cfd.receivesInput > 0) {
-      const rIn = getRecipeInputsPerMinute(t.node.recipeKey);
-      if (rIn.length === 1) {
-        const ik = rIn[0]!.itemKey;
-        pushItemKey(ik);
-        consumed.set(ik, (consumed.get(ik) ?? 0) + cfd.receivesInput);
-      }
-    }
-  }
-
-  const byItem = new Map<KeyName, number>();
-  const allKeys = new Set<KeyName>([...produced.keys(), ...consumed.keys()]);
-  for (const k of allKeys) {
-    byItem.set(k, Math.max(0, (produced.get(k) ?? 0) - (consumed.get(k) ?? 0)));
-  }
-
-  const ordered = itemOrder
-    .filter((k) => usedItems.has(k))
-    .map((k) => ({
-      itemKey: k,
-      itemName: getItemName(k),
-      rate: byItem.get(k) ?? 0,
-    }));
-  const rest = [...allKeys]
-    .filter((k) => usedItems.has(k) && !itemOrder.includes(k))
-    .map((k) => ({ itemKey: k, itemName: getItemName(k), rate: byItem.get(k) ?? 0 }))
-    .sort((a, b) => a.itemName.localeCompare(b.itemName));
-  return [...ordered, ...rest];
-}
-
-function StorageStrip({ items }: { items: FinalOutput[] }) {
+function StorageStrip({
+  rows,
+  onReserveDelta,
+  onOptimizeRow,
+}: {
+  rows: StorageStripRow[];
+  onReserveDelta: (itemKey: KeyName, delta: number) => void;
+  onOptimizeRow: (itemKey: KeyName) => void;
+}) {
   return (
     <aside
-      className="flex h-full min-h-0 w-56 shrink-0 flex-col border-l border-zinc-800 bg-[#101010] backdrop-blur-md"
+      className="flex h-full min-h-0 w-64 shrink-0 flex-col border-l border-zinc-800 bg-[#101010] backdrop-blur-md"
       aria-label="Storage"
     >
-      <div className="shrink-0 border-b border-zinc-800 px-4 py-4">
+      <div className="shrink-0 border-b border-zinc-800 px-3 py-4">
         <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Storage</h2>
         <p className="mt-1 text-xs leading-snug text-zinc-600">
-          Surplus production (not consumed downstream), items/min
+          Surplus vs downstream use. +/− set a personal reserve (items/min); ✕ trims waste (machines first,
+          then clock).
         </p>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
-        {items.length === 0 ? (
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
+        {rows.length === 0 ? (
           <p className="text-sm text-zinc-600">Nothing in storage</p>
         ) : (
           <ul className="space-y-3">
-            {items.map(({ itemKey, itemName, rate }) => (
-              <li key={itemKey} className="flex flex-col gap-0.5 border-b border-zinc-800/80 pb-3 last:border-0 last:pb-0">
+            {rows.map(({ itemKey, itemName, surplusRate, reservePerMin }) => (
+              <li
+                key={itemKey}
+                className="flex flex-col gap-1.5 border-b border-zinc-800/80 pb-3 last:border-0 last:pb-0"
+              >
                 <span className="text-sm font-medium leading-tight text-zinc-200">{itemName}</span>
-                <span className="font-mono text-xs text-amber-400/90">{formatRate(rate)}/min</span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-mono text-[11px] text-amber-400/90" title="Current surplus">
+                    +{formatRate(surplusRate)}/min
+                  </span>
+                  {reservePerMin > 0 && (
+                    <span className="font-mono text-[11px] text-teal-400/90" title="Target extra reserve">
+                      r{formatRate(reservePerMin)}/min
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    title="Increase reserve by 1/min (scale up first producer)"
+                    onClick={() => onReserveDelta(itemKey, 1)}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-sm font-medium text-zinc-200 hover:border-amber-500/50 hover:bg-zinc-700"
+                  >
+                    +
+                  </button>
+                  <button
+                    type="button"
+                    title="Decrease reserve by 1/min"
+                    onClick={() => onReserveDelta(itemKey, -1)}
+                    disabled={reservePerMin <= 0}
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-sm font-medium text-zinc-200 hover:border-amber-500/50 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    title="Clear reserve and remove surplus (whole machines first, then lower clock)"
+                    onClick={() => onOptimizeRow(itemKey)}
+                    className="ml-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-xs font-bold text-zinc-400 hover:border-red-500/40 hover:bg-red-950/40 hover:text-red-300"
+                  >
+                    ✕
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -1569,6 +1466,424 @@ function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSe
   return result;
 }
 
+/** Produced / consumed rates from the same rules as Storage (per-item mass balance). */
+function computeFlowBalanceMaps(
+  tree: TreeNode,
+  flowRates: Map<string, FlowRateData | { parentSending: number }>
+): { produced: Map<KeyName, number>; consumed: Map<KeyName, number> } {
+  const produced = new Map<KeyName, number>();
+  const consumed = new Map<KeyName, number>();
+  for (const t of getAllNodes(tree)) {
+    if (!t.node.outputItemKey) continue;
+    const outKey = t.node.outputItemKey;
+    const fd = flowRates.get(t.id);
+    let outputRate: number;
+    if (fd && "currentOutput" in fd) {
+      outputRate = (fd as FlowRateData).currentOutput;
+    } else if (fd && "parentSending" in fd) {
+      outputRate = (fd as { parentSending: number }).parentSending;
+    } else {
+      outputRate =
+        getEffectiveOutputPerMachine(t.node) * (t.node.clockPercent / 100) * t.node.count;
+    }
+    produced.set(outKey, (produced.get(outKey) ?? 0) + outputRate);
+
+    if (t.node.isRaw || !t.node.recipeKey) continue;
+    const cfd = flowRates.get(t.id) as FlowRateData | undefined;
+    if (!cfd || !("needsInput" in cfd)) continue;
+    if (cfd.inputs && cfd.inputs.length > 0) {
+      for (const inp of cfd.inputs) {
+        consumed.set(inp.itemKey, (consumed.get(inp.itemKey) ?? 0) + inp.receivesInput);
+      }
+    } else if (cfd.receivesInput > 0) {
+      const rIn = getRecipeInputsPerMinute(t.node.recipeKey);
+      if (rIn.length === 1) {
+        const ik = rIn[0]!.itemKey;
+        consumed.set(ik, (consumed.get(ik) ?? 0) + cfd.receivesInput);
+      }
+    }
+  }
+  return { produced, consumed };
+}
+
+const STORAGE_BALANCE_EPS = 0.35;
+const STORAGE_CLOCK_STEP = 5;
+
+function findFirstProducerForItem(tree: TreeNode, itemKey: KeyName): TreeNode | null {
+  for (const t of getAllNodes(tree)) {
+    if (t.node.outputItemKey === itemKey) return t;
+  }
+  return null;
+}
+
+function tryStepScaleDownProducer(tree: TreeNode, nodeId: string): TreeNode | null {
+  const tn = findNode(tree, nodeId);
+  if (!tn) return null;
+  const n = tn.node;
+  if (n.count > 1) {
+    return updateNodeInTree(tree, nodeId, { count: n.count - 1 });
+  }
+  if (n.clockPercent > 100) {
+    return updateNodeInTree(tree, nodeId, {
+      clockPercent: Math.max(100, n.clockPercent - STORAGE_CLOCK_STEP),
+    });
+  }
+  return null;
+}
+
+function tryStepScaleUpProducer(
+  tree: TreeNode,
+  nodeId: string,
+  itemKey: KeyName,
+  reserves: Readonly<Record<string, number>>
+): TreeNode | null {
+  const tn = findNode(tree, nodeId);
+  if (!tn) return null;
+  const n = tn.node;
+  const b = getEffectiveOutputPerMachine(n);
+  if (b <= 0) return null;
+
+  const fr = computeFlowRates(tree);
+  const { produced, consumed } = computeFlowBalanceMaps(tree, fr);
+  const target = (consumed.get(itemKey) ?? 0) + (reserves[itemKey] ?? 0);
+  const sup = produced.get(itemKey) ?? 0;
+  if (sup >= target - STORAGE_BALANCE_EPS) return null;
+
+  // Prefer whole machines at 100% before overclocking; snap when clock crosses +1 equivalent machine.
+  const equivNow = (n.count * n.clockPercent) / 100;
+  if (n.clockPercent > 100.5 && equivNow >= n.count + 1 - 1e-6) {
+    return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+  }
+
+  if (n.clockPercent <= 100.5) {
+    const at100 = n.count * b;
+    if (target > at100 + STORAGE_BALANCE_EPS) {
+      return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+    }
+  }
+
+  const nextClock = Math.min(250, n.clockPercent + STORAGE_CLOCK_STEP);
+  const equivIfClock = (n.count * nextClock) / 100;
+  if (nextClock > n.clockPercent && equivIfClock >= n.count + 1 - 1e-6) {
+    return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+  }
+
+  if (n.clockPercent < 250) {
+    return updateNodeInTree(tree, nodeId, { clockPercent: nextClock });
+  }
+
+  return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+}
+
+/** Remove surplus for `itemKey` without going under downstream demand (first matching producer only). */
+function optimizeStorageItemNoWaste(tree: TreeNode, itemKey: KeyName): TreeNode {
+  let t = recalcTree(synthesizeMissingInputEdges(tree));
+  for (let i = 0; i < 100; i++) {
+    const fr = computeFlowRates(t);
+    const { produced, consumed } = computeFlowBalanceMaps(t, fr);
+    const dem = consumed.get(itemKey) ?? 0;
+    const sup = produced.get(itemKey) ?? 0;
+    if (sup <= dem + STORAGE_BALANCE_EPS) break;
+    const anchor = findFirstProducerForItem(t, itemKey);
+    if (!anchor) break;
+    const next = tryStepScaleDownProducer(t, anchor.id);
+    if (!next) break;
+    const t2 = recalcTree(synthesizeMissingInputEdges(next));
+    const fr2 = computeFlowRates(t2);
+    const { produced: p2, consumed: c2 } = computeFlowBalanceMaps(t2, fr2);
+    const sup2 = p2.get(itemKey) ?? 0;
+    const dem2 = c2.get(itemKey) ?? 0;
+    if (sup2 < dem2 - 0.01) break;
+    t = t2;
+  }
+  return t;
+}
+
+/** Meet downstream demand + reserve for `itemKey` (scale up first producer). */
+function satisfyStorageReserveForItem(
+  tree: TreeNode,
+  itemKey: KeyName,
+  reserves: Readonly<Record<string, number>>
+): TreeNode {
+  let t = recalcTree(synthesizeMissingInputEdges(tree));
+  for (let i = 0; i < 100; i++) {
+    const fr = computeFlowRates(t);
+    const { produced, consumed } = computeFlowBalanceMaps(t, fr);
+    const target = (consumed.get(itemKey) ?? 0) + (reserves[itemKey] ?? 0);
+    const sup = produced.get(itemKey) ?? 0;
+    if (sup >= target - STORAGE_BALANCE_EPS) break;
+    const anchor = findFirstProducerForItem(t, itemKey);
+    if (!anchor) break;
+    const next = tryStepScaleUpProducer(t, anchor.id, itemKey, reserves);
+    if (!next) break;
+    t = recalcTree(synthesizeMissingInputEdges(next));
+  }
+  return t;
+}
+
+function nodeOutputFromFlow(
+  flowRates: Map<string, FlowRateData | { parentSending: number }>,
+  nodeId: string
+): number {
+  const fd = flowRates.get(nodeId);
+  if (!fd) return 0;
+  if ("currentOutput" in fd) return (fd as FlowRateData).currentOutput ?? 0;
+  if ("parentSending" in fd) return (fd as { parentSending: number }).parentSending;
+  return 0;
+}
+
+/** Max output if fully fed (machines) or extractor theoretical (raw). Do not use {@link nodeOutputFromFlow} for scale-up decisions — it uses utilization and causes runaway machine counts. */
+function nodeTheoreticalMaxOutputFromFlow(
+  flowRates: Map<string, FlowRateData | { parentSending: number }>,
+  nodeId: string
+): number {
+  const fd = flowRates.get(nodeId);
+  if (!fd) return 0;
+  if ("maxOutput" in fd && typeof (fd as FlowRateData).maxOutput === "number") {
+    return (fd as FlowRateData).maxOutput;
+  }
+  if ("parentSending" in fd) {
+    return (fd as { parentSending: number }).parentSending;
+  }
+  return 0;
+}
+
+/** Smallest belt tier ≥ preferred Mk that still carries `throughputNeeded` (otherwise max of those tiers). */
+function pickBeltAtLeastPreferred(throughputNeeded: number, preferredBeltKey: string): string {
+  const pref = getBelt(preferredBeltKey);
+  const minRate = pref?.rate ?? 60;
+  const belts = getAllBelts()
+    .filter((b) => b.rate >= minRate)
+    .sort((a, b) => a.rate - b.rate);
+  if (belts.length === 0) return preferredBeltKey;
+  const ok = belts.find((b) => b.rate >= throughputNeeded);
+  return ok?.key_name ?? belts[belts.length - 1]!.key_name;
+}
+
+function tryStepScaleUpProducerMinOutput(
+  tree: TreeNode,
+  nodeId: string,
+  minOutputRate: number
+): TreeNode | null {
+  const fr = computeFlowRates(tree);
+  const theory = nodeTheoreticalMaxOutputFromFlow(fr, nodeId);
+  if (theory >= minOutputRate - STORAGE_BALANCE_EPS) return null;
+
+  const tn = findNode(tree, nodeId);
+  if (!tn) return null;
+  const n = tn.node;
+  const b = getEffectiveOutputPerMachine(n);
+  if (b <= 0) return null;
+
+  const equivNow = (n.count * n.clockPercent) / 100;
+  if (n.clockPercent > 100.5 && equivNow >= n.count + 1 - 1e-6) {
+    return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+  }
+
+  if (n.clockPercent <= 100.5) {
+    const at100 = n.count * b;
+    if (minOutputRate > at100 + STORAGE_BALANCE_EPS) {
+      return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+    }
+  }
+
+  const nextClock = Math.min(250, n.clockPercent + STORAGE_CLOCK_STEP);
+  const equivIfClock = (n.count * nextClock) / 100;
+  if (nextClock > n.clockPercent && equivIfClock >= n.count + 1 - 1e-6) {
+    return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+  }
+
+  if (n.clockPercent < 250) {
+    return updateNodeInTree(tree, nodeId, { clockPercent: nextClock });
+  }
+
+  return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
+}
+
+function depthFromRoot(tree: TreeNode, nodeId: string): number {
+  let d = 0;
+  let cur: TreeNode | null = findNode(tree, nodeId);
+  while (cur?.parentId) {
+    d += 1;
+    cur = findNode(tree, cur.parentId);
+  }
+  return d;
+}
+
+/** `startId` plus every machine/miner reachable by following recipe inputs → {@link resolveSupplierIds}. */
+function collectUpstreamClosureIds(tree: TreeNode, startId: string): string[] {
+  const seen = new Set<string>();
+  const order: string[] = [];
+  function visit(id: string) {
+    if (seen.has(id)) return;
+    seen.add(id);
+    order.push(id);
+    const n = findNode(tree, id);
+    if (!n || !n.node.recipeKey || n.node.isRaw) return;
+    for (const { itemKey } of getRecipeInputsPerMinute(n.node.recipeKey)) {
+      for (const sid of resolveSupplierIds(tree, n, itemKey)) {
+        visit(sid);
+      }
+    }
+  }
+  visit(startId);
+  return order;
+}
+
+function applyBeltForConsumerInput(
+  tree: TreeNode,
+  consumerId: string,
+  itemKey: KeyName,
+  needThroughput: number,
+  preferredBeltKey: string
+): TreeNode {
+  const consumer = findNode(tree, consumerId);
+  if (!consumer) return tree;
+  const beltKey = pickBeltAtLeastPreferred(needThroughput, preferredBeltKey);
+  const parent = consumer.parentId ? findNode(tree, consumer.parentId) : null;
+  if (parent?.node.outputItemKey === itemKey) {
+    return updateChildBeltInTree(tree, parent.id, consumerId, beltKey);
+  }
+  const edge = consumer.inputEdges?.find((e) => e.itemKey === itemKey);
+  if (edge) {
+    return updateInputEdgeBeltInTree(tree, consumerId, itemKey, beltKey);
+  }
+  return tree;
+}
+
+function readConsumerInputFlow(
+  tree: TreeNode,
+  flowRates: Map<string, FlowRateData | { parentSending: number }>,
+  consumerId: string,
+  itemKey: KeyName
+): { needs: number; receives: number } {
+  const consumer = findNode(tree, consumerId);
+  if (!consumer?.node.recipeKey) return { needs: 0, receives: 0 };
+  const base = getRecipeInputsPerMinute(consumer.node.recipeKey).find((x) => x.itemKey === itemKey);
+  const needsFallback = (base?.perMinute ?? 0) * consumer.node.count;
+  const cfd = flowRates.get(consumerId) as FlowRateData | undefined;
+  if (cfd?.inputs && cfd.inputs.length > 0) {
+    const row = cfd.inputs.find((i) => i.itemKey === itemKey);
+    if (row) return { needs: row.needsInput, receives: row.receivesInput };
+  }
+  if (cfd && "receivesInput" in cfd) {
+    const parent = consumer.parentId ? findNode(tree, consumer.parentId) : null;
+    if (parent?.node.outputItemKey === itemKey) {
+      return { needs: cfd.needsInput, receives: cfd.receivesInput };
+    }
+  }
+  return { needs: needsFallback, receives: 0 };
+}
+
+function scaleSupplierUntilInputFed(
+  tree: TreeNode,
+  consumerId: string,
+  itemKey: KeyName,
+  supplierId: string,
+  preferredBeltKey: string
+): TreeNode {
+  let t = tree;
+  for (let g = 0; g < 140; g++) {
+    t = recalcTree(synthesizeMissingInputEdges(t));
+    const consumer = findNode(t, consumerId);
+    if (!consumer?.node.recipeKey) break;
+    const base = getRecipeInputsPerMinute(consumer.node.recipeKey).find((x) => x.itemKey === itemKey);
+    if (!base) break;
+    const needThroughput = base.perMinute * consumer.node.count;
+    t = applyBeltForConsumerInput(t, consumerId, itemKey, needThroughput, preferredBeltKey);
+    t = recalcTree(synthesizeMissingInputEdges(t));
+
+    const fr = computeFlowRates(t);
+    const { needs, receives } = readConsumerInputFlow(t, fr, consumerId, itemKey);
+    if (needs <= 0) break;
+    if (receives >= needs - STORAGE_BALANCE_EPS) break;
+
+    // If the supplier already has enough *capacity*, low receives are belt/pool/upstream — do not add machines.
+    const supplierTheory = nodeTheoreticalMaxOutputFromFlow(fr, supplierId);
+    if (supplierTheory >= needs - STORAGE_BALANCE_EPS) break;
+
+    const stepped = tryStepScaleUpProducerMinOutput(t, supplierId, needs);
+    if (!stepped) break;
+    t = stepped;
+  }
+  return t;
+}
+
+/** For one machine: every recipe input → resolve suppliers (parent, edges, slices), belts, scale suppliers until sim feeds it. */
+function autoBalanceAllInputsForNode(
+  tree: TreeNode,
+  consumerId: string,
+  preferredBeltKey: string
+): TreeNode {
+  let t = tree;
+  const consumer = findNode(t, consumerId);
+  if (!consumer || consumer.node.isRaw || !consumer.node.recipeKey) return t;
+
+  for (const { itemKey, perMinute } of getRecipeInputsPerMinute(consumer.node.recipeKey)) {
+    if (perMinute <= 0) continue;
+    const needThroughput = perMinute * consumer.node.count;
+    const suppliers = resolveSupplierIds(t, consumer, itemKey);
+    if (suppliers.length === 0) continue;
+
+    const parent = consumer.parentId ? findNode(t, consumer.parentId) : null;
+    const edge = consumer.inputEdges?.find((e) => e.itemKey === itemKey);
+    const primary =
+      parent?.node.outputItemKey === itemKey
+        ? parent.id
+        : edge?.producerId;
+    const orderedSuppliers = primary
+      ? [primary, ...suppliers.filter((id) => id !== primary)]
+      : suppliers;
+
+    t = applyBeltForConsumerInput(t, consumerId, itemKey, needThroughput, preferredBeltKey);
+
+    for (const supplierId of orderedSuppliers) {
+      t = scaleSupplierUntilInputFed(t, consumerId, itemKey, supplierId, preferredBeltKey);
+      t = recalcTree(synthesizeMissingInputEdges(t));
+      const fr = computeFlowRates(t);
+      const { needs, receives } = readConsumerInputFlow(t, fr, consumerId, itemKey);
+      if (needs > 0 && receives >= needs - STORAGE_BALANCE_EPS) break;
+    }
+  }
+  return t;
+}
+
+/**
+ * Auto-balance after an edit: walk the upstream closure from `startNodeId` (recipe consumers only), shallow→deep,
+ * repeatedly satisfying every input via {@link resolveSupplierIds} (not only tree parent). Fixes multi-input machines
+ * (e.g. Encased Industrial Beam: steel beam + concrete from edges / other slices).
+ */
+function autoBalanceAfterEdit(
+  tree: TreeNode,
+  startNodeId: string,
+  preferredBeltKey: string
+): TreeNode {
+  let t = recalcTree(synthesizeMissingInputEdges(tree));
+  const closure = collectUpstreamClosureIds(t, startNodeId);
+  const consumerIds = closure.filter((id) => {
+    const n = findNode(t, id);
+    return Boolean(n && !n.node.isRaw && n.node.recipeKey);
+  });
+  consumerIds.sort((a, b) => depthFromRoot(t, a) - depthFromRoot(t, b));
+
+  for (let round = 0; round < 10; round++) {
+    t = recalcTree(synthesizeMissingInputEdges(t));
+    for (const cid of consumerIds) {
+      t = autoBalanceAllInputsForNode(t, cid, preferredBeltKey);
+    }
+  }
+  return recalcTree(synthesizeMissingInputEdges(t));
+}
+
+/** @deprecated Use {@link autoBalanceAfterEdit}; kept name for call sites. */
+function autoBalanceAncestorChain(
+  tree: TreeNode,
+  leafId: string,
+  preferredBeltKey: string
+): TreeNode {
+  return autoBalanceAfterEdit(tree, leafId, preferredBeltKey);
+}
+
 function recalcTree(tree: TreeNode): TreeNode {
   function recalc(t: TreeNode): TreeNode {
     const recalcChildren = t.children.map(recalc);
@@ -1633,6 +1948,15 @@ function buildTreeFromChain(
   return nodes[0] ?? EMPTY_TREE;
 }
 
+/** Deepest node following the first child at each level (linear chain trees). */
+function getDeepestDescendantId(root: TreeNode): string {
+  let cur: TreeNode = root;
+  while (cur.children.length > 0) {
+    cur = cur.children[0]!;
+  }
+  return cur.id;
+}
+
 export function FlowChart() {
   const [tree, setTree] = useState<TreeNode>(EMPTY_TREE);
   const [currentChartId, setCurrentChartId] = useState<string | null>(null);
@@ -1645,6 +1969,9 @@ export function FlowChart() {
   const [layout, setLayout] = useState<"vertical" | "horizontal">("horizontal");
   const [separateAction, setSeparateAction] = useState<(() => void) | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const [storageReserves, setStorageReserves] = useState<Record<string, number>>({});
+  const [autoBalanceEnabled, setAutoBalanceEnabled] = useState(false);
+  const [preferredBeltKey, setPreferredBeltKey] = useState("belt4");
 
   useEffect(() => {
     const saved = getSavedCharts();
@@ -1653,7 +1980,10 @@ export function FlowChart() {
     if (lastId) {
       const loaded = loadChart(lastId);
       if (loaded) {
-        setTree(recalcTree(synthesizeMissingInputEdges(loaded)));
+        setTree(recalcTree(synthesizeMissingInputEdges(loaded.tree)));
+        setStorageReserves(loaded.storageReserves);
+        setAutoBalanceEnabled(loaded.autoBalanceEnabled);
+        setPreferredBeltKey(loaded.preferredBeltKey);
         const c = saved.find((x) => x.id === lastId);
         setCurrentChartId(lastId);
         setCurrentChartName(c?.name ?? "Untitled");
@@ -1664,7 +1994,10 @@ export function FlowChart() {
   const loadChartById = useCallback((id: string) => {
     const loaded = loadChart(id);
     if (loaded) {
-      setTree(recalcTree(synthesizeMissingInputEdges(loaded)));
+      setTree(recalcTree(synthesizeMissingInputEdges(loaded.tree)));
+      setStorageReserves(loaded.storageReserves);
+      setAutoBalanceEnabled(loaded.autoBalanceEnabled);
+      setPreferredBeltKey(loaded.preferredBeltKey);
       setCurrentChartId(id);
       const saved = getSavedCharts();
       const c = saved.find((x) => x.id === id);
@@ -1672,31 +2005,43 @@ export function FlowChart() {
     }
   }, []);
 
+  const chartExtras = useMemo(
+    () => ({
+      storageReserves,
+      autoBalanceEnabled,
+      preferredBeltKey,
+    }),
+    [storageReserves, autoBalanceEnabled, preferredBeltKey]
+  );
+
   const handleNewChart = useCallback(() => {
     setTree(EMPTY_TREE);
     setCurrentChartId(null);
     setCurrentChartName("Untitled");
+    setStorageReserves({});
+    setAutoBalanceEnabled(false);
+    setPreferredBeltKey("belt4");
   }, []);
 
   const handleSave = useCallback(() => {
     if (currentChartId) {
-      saveChart(currentChartId, currentChartName, tree);
+      saveChart(currentChartId, currentChartName, tree, chartExtras);
       setCharts(getSavedCharts());
     } else {
       setSaveAsOpen(true);
     }
-  }, [currentChartId, currentChartName, tree]);
+  }, [currentChartId, currentChartName, tree, chartExtras]);
 
   const handleSaveAs = useCallback(
     (name: string) => {
       const id = generateChartId();
-      saveChart(id, name, tree);
+      saveChart(id, name, tree, chartExtras);
       setCurrentChartId(id);
       setCurrentChartName(name);
       setCharts(getSavedCharts());
       setSaveAsOpen(false);
     },
-    [tree]
+    [tree, chartExtras]
   );
 
   const handleDeleteChart = useCallback((id: string) => {
@@ -1710,6 +2055,9 @@ export function FlowChart() {
         setTree(EMPTY_TREE);
         setCurrentChartId(null);
         setCurrentChartName("Untitled");
+        setStorageReserves({});
+        setAutoBalanceEnabled(false);
+        setPreferredBeltKey("belt4");
       }
     }
   }, [currentChartId, loadChartById]);
@@ -1757,18 +2105,24 @@ export function FlowChart() {
       const idx = insertAtIndex ?? (isBranch ? 0 : parentTreeNode.children.length);
       let updated = addChildToNode(tree, parentTreeNode.id, n, idx, inputEdges);
       updated = recalcTree(synthesizeMissingInputEdges(updated));
+      if (autoBalanceEnabled) {
+        updated = autoBalanceAncestorChain(updated, n.id, preferredBeltKey);
+      }
       setTree(updated);
     },
-    [tree]
+    [tree, autoBalanceEnabled, preferredBeltKey]
   );
 
   const updateNode = useCallback(
     (nodeId: string, updates: Partial<FlowNode>) => {
       let updated = updateNodeInTree(tree, nodeId, updates);
       updated = recalcTree(updated);
+      if (autoBalanceEnabled) {
+        updated = autoBalanceAncestorChain(updated, nodeId, preferredBeltKey);
+      }
       setTree(updated);
     },
-    [tree]
+    [tree, autoBalanceEnabled, preferredBeltKey]
   );
 
   const setNodeMachine = useCallback(
@@ -1854,19 +2208,95 @@ export function FlowChart() {
 
   const buildInventory = useMemo(() => computeBuildInventory(tree), [tree]);
 
-  const finalOutputs = useMemo(
-    () => computeFinalOutputs(tree, flowRates),
-    [tree, flowRates]
-  );
+  const storageRows = useMemo((): StorageStripRow[] => {
+    if (!tree.node.outputItemKey) return [];
+    const balance = computeFlowBalanceMaps(tree, flowRates);
+    const keys = new Set<KeyName>();
+    for (const [k, v] of balance.produced) {
+      if (v > 1e-6) keys.add(k);
+    }
+    for (const k of Object.keys(storageReserves)) {
+      if ((storageReserves[k] ?? 0) > 0) keys.add(k as KeyName);
+    }
+    return [...keys]
+      .sort((a, b) => getItemName(a).localeCompare(getItemName(b)))
+      .map((itemKey) => ({
+        itemKey,
+        itemName: getItemName(itemKey),
+        surplusRate: Math.max(
+          0,
+          (balance.produced.get(itemKey) ?? 0) - (balance.consumed.get(itemKey) ?? 0)
+        ),
+        reservePerMin: storageReserves[itemKey as string] ?? 0,
+      }));
+  }, [tree, flowRates, storageReserves]);
 
-  const storageItems = useMemo(
-    () => finalOutputs.filter((r) => r.rate > 1e-6),
-    [finalOutputs]
-  );
+  const adjustStorageReserve = useCallback((itemKey: KeyName, delta: number) => {
+    setStorageReserves((prev) => {
+      const cur = prev[itemKey as string] ?? 0;
+      const n = Math.max(0, cur + delta);
+      const next: Record<string, number> = { ...prev };
+      if (n <= 0) delete next[itemKey as string];
+      else next[itemKey as string] = n;
+      queueMicrotask(() => {
+        setTree((t0) =>
+          n > 0
+            ? satisfyStorageReserveForItem(t0, itemKey, next)
+            : optimizeStorageItemNoWaste(t0, itemKey)
+        );
+      });
+      return next;
+    });
+  }, []);
+
+  const optimizeStorageRow = useCallback((itemKey: KeyName) => {
+    setStorageReserves((prev) => {
+      const next = { ...prev };
+      delete next[itemKey as string];
+      queueMicrotask(() => {
+        setTree((t0) => optimizeStorageItemNoWaste(t0, itemKey));
+      });
+      return next;
+    });
+  }, []);
 
   const [addMachineOpen, setAddMachineOpen] = useState(false);
+  const [quickBuildOpen, setQuickBuildOpen] = useState(false);
+  const [quickBuildKey, setQuickBuildKey] = useState(0);
+  const [quickBuildError, setQuickBuildError] = useState<string | null>(null);
 
-  const storageStrip = <StorageStrip items={storageItems} />;
+  const handleQuickBuildConfirm = useCallback(
+    (args: { productKey: KeyName; recipeKey: string; minerKey: string }) => {
+      setQuickBuildError(null);
+      const planned = planProductionFromTarget(
+        { productKey: args.productKey, recipeKey: args.recipeKey },
+        { minerKey: args.minerKey }
+      );
+      if (!planned.ok) {
+        setQuickBuildError(planned.error);
+        return;
+      }
+      try {
+        const { tree, targetNodeId } = productionPlanToSliceTree(planned.plan);
+        let t = recalcTree(synthesizeMissingInputEdges(tree));
+        t = autoBalanceAfterEdit(t, targetNodeId, preferredBeltKey);
+        setTree(t);
+        setAutoBalanceEnabled(true);
+        setQuickBuildOpen(false);
+      } catch (e) {
+        setQuickBuildError(e instanceof Error ? e.message : "Failed to layout factory from plan.");
+      }
+    },
+    [preferredBeltKey]
+  );
+
+  const storageStrip = (
+    <StorageStrip
+      rows={storageRows}
+      onReserveDelta={adjustStorageReserve}
+      onOptimizeRow={optimizeStorageRow}
+    />
+  );
 
   const header = (
     <header className="shrink-0 border-b border-zinc-800 bg-zinc-900/30">
@@ -1916,7 +2346,7 @@ export function FlowChart() {
                       aria-hidden="true"
                     />
                     <div
-                      className="fixed z-50 w-56 rounded-xl border-2 border-zinc-700 bg-zinc-900 p-2 shadow-xl"
+                      className="fixed z-50 w-64 max-w-[calc(100vw-2rem)] rounded-xl border-2 border-zinc-700 bg-zinc-900 p-2 shadow-xl"
                       style={
                         rect
                           ? { top: rect.bottom + 8, right: window.innerWidth - rect.right }
@@ -1966,6 +2396,36 @@ export function FlowChart() {
                   >
                     → Horizontal
                   </button>
+                </div>
+                <div className="mb-2 rounded-lg border border-zinc-700 p-2">
+                  <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
+                    <input
+                      type="checkbox"
+                      checked={autoBalanceEnabled}
+                      onChange={(e) => setAutoBalanceEnabled(e.target.checked)}
+                      className="mt-0.5 rounded border-zinc-600"
+                    />
+                    <span>
+                      <span className="font-medium text-zinc-200">Auto-balance</span>
+                      <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">
+                        After adds or edits, scale tree ancestors (parent→root) to meet belted demand. Surplus OK.
+                      </span>
+                    </span>
+                  </label>
+                  <label className="mt-2 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">
+                    Min belt tier
+                  </label>
+                  <select
+                    value={preferredBeltKey}
+                    onChange={(e) => setPreferredBeltKey(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-xs text-zinc-200"
+                  >
+                    {BELTS.map((b) => (
+                      <option key={b.key_name} value={b.key_name}>
+                        {b.name} ({formatRate(b.rate)}/min)
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <button
                   type="button"
@@ -2025,41 +2485,59 @@ export function FlowChart() {
 
   if (isEmpty && layout !== "horizontal") {
     return (
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        {header}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
-          <main className="min-h-0 min-w-0 flex-1 overflow-auto">
-            <div className="flex min-h-0 min-w-0 items-center justify-center p-6">
-              <div className="flex flex-col items-center">
-                <button
-                  type="button"
-                  onClick={() => setAddMachineOpen(true)}
-                  className={`flex min-h-[120px] min-w-[120px] flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition ${addMachineOpen ? "border-amber-500/60 bg-zinc-800" : "border-dashed border-zinc-600 bg-zinc-900/50 hover:border-amber-500/40 hover:bg-zinc-800/80"}`}
-                >
-                  <span className="text-3xl font-light text-zinc-400">+</span>
-                  <span className="text-center text-sm font-medium text-zinc-400">Add machine</span>
-                </button>
-                {addMachineOpen && (
-                  <AddMachineModal
-                    title="Add machine"
-                    options={getExtractorMachineOptions()}
-                    onSelect={(opt) => {
-                      addMachine(tree, opt);
-                      setAddMachineOpen(false);
-                    }}
-                    onClose={() => setAddMachineOpen(false)}
-                  />
-                )}
+      <>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {header}
+          <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
+            <main className="min-h-0 min-w-0 flex-1 overflow-auto">
+              <div className="flex min-h-0 min-w-0 items-center justify-center p-6">
+                <div className="flex flex-col items-center">
+                  <button
+                    type="button"
+                    onClick={() => setAddMachineOpen(true)}
+                    className={`flex min-h-[120px] min-w-[120px] flex-col items-center justify-center gap-2 rounded-xl border-2 p-4 transition ${addMachineOpen ? "border-amber-500/60 bg-zinc-800" : "border-dashed border-zinc-600 bg-zinc-900/50 hover:border-amber-500/40 hover:bg-zinc-800/80"}`}
+                  >
+                    <span className="text-3xl font-light text-zinc-400">+</span>
+                    <span className="text-center text-sm font-medium text-zinc-400">Add machine</span>
+                  </button>
+                  {addMachineOpen && (
+                    <AddMachineModal
+                      title="Add machine"
+                      options={getExtractorMachineOptions()}
+                      onSelect={(opt) => {
+                        addMachine(tree, opt);
+                        setAddMachineOpen(false);
+                      }}
+                      onClose={() => setAddMachineOpen(false)}
+                    />
+                  )}
+                </div>
               </div>
-            </div>
-          </main>
-          {storageStrip}
+            </main>
+            {storageStrip}
+          </div>
         </div>
-      </div>
+        <QuickBuildFab
+          onClick={() => {
+            setQuickBuildError(null);
+            setQuickBuildKey((k) => k + 1);
+            setQuickBuildOpen(true);
+          }}
+        />
+        <QuickBuildModal
+          key={quickBuildKey}
+          open={quickBuildOpen}
+          onClose={() => setQuickBuildOpen(false)}
+          onConfirm={handleQuickBuildConfirm}
+          error={quickBuildError}
+          hasExistingChart={false}
+        />
+      </>
     );
   }
 
   return (
+    <>
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {header}
       <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
@@ -2089,7 +2567,13 @@ export function FlowChart() {
           onRemove={undefined}
           removeNode={removeNode}
           onSetSeparateAction={setSeparateAction}
-          onSeedStarter={(t) => setTree(recalcTree(synthesizeMissingInputEdges(t)))}
+          onSeedStarter={(t) => {
+            let next = recalcTree(synthesizeMissingInputEdges(t));
+            const leafId = getDeepestDescendantId(next);
+            next = autoBalanceAfterEdit(next, leafId, preferredBeltKey);
+            setTree(next);
+            setAutoBalanceEnabled(true);
+          }}
           flowFocusNodeId={flowFocusNodeId}
           flowFocusRelatedIds={flowFocusRelatedIds}
           onFlowNodeHoverEnter={setFlowHoverNodeId}
@@ -2129,6 +2613,22 @@ export function FlowChart() {
         {storageStrip}
       </div>
     </div>
+    <QuickBuildFab
+      onClick={() => {
+        setQuickBuildError(null);
+        setQuickBuildKey((k) => k + 1);
+        setQuickBuildOpen(true);
+      }}
+    />
+    <QuickBuildModal
+      key={quickBuildKey}
+      open={quickBuildOpen}
+      onClose={() => setQuickBuildOpen(false)}
+      onConfirm={handleQuickBuildConfirm}
+      error={quickBuildError}
+      hasExistingChart={!isEmpty}
+    />
+    </>
   );
 }
 
@@ -2904,9 +3404,18 @@ function TreeLevelSlices(props: TreeLevelProps) {
         <button
           type="button"
           onClick={() => {
-            const chain = buildChain("iron-plates");
+            const chain = buildChain("iron-plate");
             if (chain && props.onSeedStarter) {
-              const starterTree = buildTreeFromChain(chain, 20, "miner-mk1");
+              const lastStep = chain[chain.length - 1]!;
+              let oneMachineRate = 60;
+              if (lastStep.recipeKey !== "_raw_") {
+                const r = getRecipe(lastStep.recipeKey);
+                if (r) {
+                  const { products } = recipePerMinute(r);
+                  oneMachineRate = products.find(([k]) => k === lastStep.itemKey)?.[1] ?? 60;
+                }
+              }
+              const starterTree = buildTreeFromChain(chain, oneMachineRate, "miner-mk2");
               props.onSeedStarter(starterTree);
             } else {
               setAddMachineParent(tree);
