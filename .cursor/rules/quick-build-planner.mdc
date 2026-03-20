@@ -1,0 +1,28 @@
+---
+description: Quick build (+) and production planner — architecture and where to edit
+globs: src/lib/productionPlanner.ts,src/lib/plannerToTree.ts,src/lib/flowChartModel.ts,src/components/QuickBuildModal.tsx,src/components/FlowChart.tsx
+alwaysApply: false
+---
+
+# Quick build & production planner
+
+When changing the **+** quick build, multi-input planning, or plan→tree layout:
+
+1. **Read first:** `docs/QUICK_BUILD_AND_PLANNER.md` (full flow, file map, limitations).
+
+2. **Planning logic** → `src/lib/productionPlanner.ts`  
+   - One machine @ 100% on chosen recipe; recursive upstream; cycles → error.  
+   - Extractors: `_raw_*` keys via `getExtractorMachineOptionsFull`.
+
+3. **Plan → `TreeNode`** → `src/lib/plannerToTree.ts`  
+   - Spine parent = deepest supplier; others → `inputEdges` with real **`FlowNode.id`**.
+
+4. **UI** → `src/components/QuickBuildModal.tsx` (product + recipe + miner; no target rate).
+
+5. **Wire + balance** → `src/components/FlowChart.tsx` (`handleQuickBuildConfirm`, `autoBalanceAfterEdit`).
+
+6. **Shared node types** → `src/lib/flowChartModel.ts` (also used by `chartStorage`).
+
+7. **Tests:** `src/lib/productionPlanner.test.ts` — run `npm test`.
+
+Do not reintroduce a separate “linear only” quick-build path unless restoring an explicit fallback; the planner should cover multi-input recipes.

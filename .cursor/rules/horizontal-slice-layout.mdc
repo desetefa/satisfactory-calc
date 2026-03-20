@@ -1,0 +1,15 @@
+---
+description: Horizontal flow slices — ordering, branch grouping, future reorder UX
+globs: src/components/FlowChart.tsx,src/lib/flowChartTree.ts,src/components/flow-chart/sliceBranchReorder.tsx,docs/HORIZONTAL_SLICE_LAYOUT.md
+alwaysApply: false
+---
+
+# Horizontal slice layout
+
+- **Full design (reorder options + grouping):** `docs/HORIZONTAL_SLICE_LAYOUT.md`
+
+- **Slice order** comes from `getFlowSlices` in `src/lib/flowChartTree.ts` → tree `children` order. Changing order = reorder **siblings** in the tree, or add a persisted **visual overlay** (`sliceOrder` per column).
+
+- **Branch grouping:** `groupSliceNodesByParent` clusters nodes with the same `parentId` in one slice; the column body uses **`justify-center`** + **`gap-8`** between groups so sibling stacks read as centered “branches.”
+
+- **Sibling reorder (Option A):** long-press (~400ms) then vertical drag within a branch (`HorizontalSliceMachineReorder`); updates `parent.children` via `reorderSiblingBefore`. **Cross-parent / horizontal** column reorder is not implemented — Option B in the doc if needed.

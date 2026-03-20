@@ -1,6 +1,12 @@
 "use client";
 
-import { useState, useCallback, useMemo, useEffect, useRef, Fragment } from "react";
+import {
+  useState,
+  useCallback,
+  useMemo,
+  useRef,
+  Fragment,
+} from "react";
 import { createPortal } from "react-dom";
 import type { KeyName } from "@/lib/types";
 import {
@@ -14,7 +20,7 @@ import {
   getRecipeInputsPerMinute,
   sortOptionsNonAltFirst,
 } from "@/lib/chain";
-import { getItem, getFluid, getBuilding, getBuildingForRecipe, getMiner, getAllBelts, getBelt, getRecipe, recipePerMinute } from "@/lib/db";
+import { getBuilding, getBuildingForRecipe, getMiner, getAllBelts, getBelt, getRecipe, recipePerMinute } from "@/lib/db";
 import {
   getSavedCharts,
   loadChart,
@@ -30,8 +36,13 @@ import {
   type ItemDisplayDensity,
 } from "@/lib/itemDisplayName";
 import { QuickBuildFab, QuickBuildModal } from "@/components/QuickBuildModal";
+import { DraggablePercent } from "@/components/flow-chart/DraggablePercent";
 import {
-  type NodePurity,
+  HorizontalSliceMachineReorder,
+  SliceBranchReorderGroup,
+  SliceBranchShiftedChrome,
+} from "@/components/flow-chart/sliceBranchReorder";
+import {
   type FlowNode,
   type InputEdge,
   type TreeNode,
@@ -41,6 +52,16 @@ import {
 } from "@/lib/flowChartModel";
 import { planProductionFromTarget } from "@/lib/productionPlanner";
 import { productionPlanToSliceTree } from "@/lib/plannerToTree";
+import {
+  EMPTY_FLOW_RELATED_IDS,
+  findNode,
+  getFlowSlices,
+  getRelatedNodeIdsForHover,
+  groupSliceNodesByParent,
+  replaceNode,
+  reorderSiblingBefore,
+  resolveSupplierIds,
+} from "@/lib/flowChartTree";
 
 export type { NodePurity, FlowNode, InputEdge, TreeNode } from "@/lib/flowChartModel";
 
@@ -59,72 +80,6 @@ function formatRate(n: number): string {
 /** Number of input slots for a building (Constructor 1, Assembler 2, Manufacturer 4, etc.) */
 function getInputSlots(buildingKey: string): number {
   return getBuilding(buildingKey)?.max ?? 0;
-}
-
-/** Draggable percent: drag left/right to adjust value (1–250). Uses pointer capture so drag continues when mouse moves outside. */
-function DraggablePercent({
-  value,
-  onChange,
-  min = 1,
-  max = 250,
-  className = "",
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  className?: string;
-}) {
-  const handlePointerDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const target = e.currentTarget as HTMLElement;
-    const pointerId = e.pointerId;
-    target.setPointerCapture(pointerId);
-    const startX = e.clientX;
-    /** Value at pointer down — cumulative dx avoids per-move rounding + magnetic snap feel */
-    const startValue = value;
-    const handleMove = (moveEvent: PointerEvent) => {
-      const dx = moveEvent.clientX - startX;
-      const next = Math.min(max, Math.max(min, Math.round(startValue + dx / 2)));
-      onChange(next);
-    };
-    const handleUp = (upEvent: PointerEvent) => {
-      if (upEvent.pointerId !== pointerId) return;
-      document.removeEventListener("pointermove", handleMove);
-      document.removeEventListener("pointerup", handleUp);
-      document.body.style.userSelect = "";
-      document.body.style.cursor = "";
-    };
-    document.addEventListener("pointermove", handleMove);
-    document.addEventListener("pointerup", handleUp);
-      document.body.style.userSelect = "none";
-    document.body.style.cursor = "none";
-  };
-
-  return (
-    <span
-      role="slider"
-      tabIndex={0}
-      aria-valuemin={min}
-      aria-valuemax={max}
-      aria-valuenow={value}
-      className={`cursor-ew-resize select-none touch-none ${className}`}
-      onPointerDown={handlePointerDown}
-      onKeyDown={(e) => {
-        const step = e.shiftKey ? 10 : 1;
-        if (e.key === "ArrowLeft") {
-          e.preventDefault();
-          onChange(Math.max(min, value - step));
-        } else if (e.key === "ArrowRight") {
-          e.preventDefault();
-          onChange(Math.min(max, value + step));
-        }
-      }}
-    >
-      {value}%
-    </span>
-  );
 }
 
 type MachineOption = {
@@ -611,7 +566,7 @@ function BuildInventoryModal({
 }) {
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+      className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
     >
       <div
@@ -664,7 +619,6 @@ interface EditNodeModalProps {
   onUpdate: (u: Partial<FlowNode>) => void;
   onSelectMachine: (opt: MachineOption) => void;
   onClose: () => void;
-  onSeparate?: () => void;
   onRemove?: () => void;
 }
 
@@ -675,7 +629,6 @@ function EditNodeModal({
   onUpdate,
   onSelectMachine,
   onClose,
-  onSeparate,
   onRemove,
 }: EditNodeModalProps) {
   const sortedProduces = sortOptionsNonAltFirst(producesOptions);
@@ -851,7 +804,7 @@ function EditNodeModal({
 
       {node.isRaw && producesModalOpen && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 p-4"
           onClick={() => setProducesModalOpen(false)}
         >
           <div
@@ -904,11 +857,6 @@ function pickDefaultBelt(throughput: number): string {
   const belts = getAllBelts().sort((a, b) => a.rate - b.rate);
   const match = belts.find((b) => b.rate >= throughput);
   return match?.key_name ?? belts[belts.length - 1]?.key_name ?? "belt1";
-}
-
-function getAllLeaves(tree: TreeNode): TreeNode[] {
-  if (tree.children.length === 0) return [tree];
-  return tree.children.flatMap((c) => getAllLeaves(c));
 }
 
 type StorageStripRow = {
@@ -1036,99 +984,6 @@ function computeBuildInventory(tree: TreeNode): BuildInventoryResult | null {
   return { buildings, powerShards };
 }
 
-function findNode(tree: TreeNode, id: string): TreeNode | null {
-  if (tree.id === id) return tree;
-  for (const c of tree.children) {
-    const found = findNode(c, id);
-    if (found) return found;
-  }
-  return null;
-}
-
-const EMPTY_FLOW_RELATED_IDS = new Set<string>();
-
-/**
- * Horizontal flow columns (same grouping as TreeLevelSlices): machines at the same “stage”
- * appear together even when they’re not in each other’s parent/child chain.
- */
-function getFlowSlices(t: TreeNode): TreeNode[][] {
-  if (!t.node.outputItemKey) return [];
-  const result: TreeNode[][] = [];
-  const rawChildren = t.children.filter((c) => c.node.isRaw);
-  const consumerChildren = t.children.filter((c) => !c.node.isRaw);
-  const level0 = [t, ...rawChildren];
-  let level: TreeNode[] = level0;
-  let nextLevel: TreeNode[] = [
-    ...consumerChildren,
-    ...rawChildren.flatMap((c) => c.children),
-  ];
-  while (level.length > 0) {
-    result.push(level);
-    level = nextLevel;
-    nextLevel = level.flatMap((n) => n.children);
-  }
-  return result;
-}
-
-/**
- * Who supplies `itemKey` to this consumer: tree parent, explicit input edge, or (fallback)
- * any node in an earlier horizontal slice that outputs that item (matches add-machine / pool semantics).
- */
-function resolveSupplierIds(tree: TreeNode, consumer: TreeNode, itemKey: KeyName): string[] {
-  const parent = consumer.parentId ? findNode(tree, consumer.parentId) : null;
-  if (parent?.node.outputItemKey === itemKey) {
-    return [parent.id];
-  }
-
-  const edge = consumer.inputEdges?.find((e) => e.itemKey === itemKey);
-  if (edge) {
-    return [edge.producerId];
-  }
-
-  const slices = getFlowSlices(tree);
-  const consumerSlice = slices.findIndex((sl) => sl.some((n) => n.id === consumer.id));
-  if (consumerSlice <= 0) return [];
-
-  const found: string[] = [];
-  for (let s = consumerSlice - 1; s >= 0; s--) {
-    for (const n of slices[s]!) {
-      if (n.node.outputItemKey === itemKey) found.push(n.id);
-    }
-    if (found.length > 0) break;
-  }
-  return [...new Set(found)];
-}
-
-/** Transitive upstream: every machine (and miner) needed to produce the hovered node's inputs. */
-function collectUpstreamSupplyIds(tree: TreeNode, nodeId: string, into: Set<string>) {
-  const node = findNode(tree, nodeId);
-  if (!node) return;
-
-  if (node.node.isRaw || !node.node.recipeKey) {
-    return;
-  }
-
-  for (const { itemKey } of getRecipeInputsPerMinute(node.node.recipeKey)) {
-    for (const sid of resolveSupplierIds(tree, node, itemKey)) {
-      if (sid === nodeId) continue;
-      if (!into.has(sid)) {
-        into.add(sid);
-        collectUpstreamSupplyIds(tree, sid, into);
-      }
-    }
-  }
-}
-
-/**
- * All nodes that supply the hovered machine (transitive recipe closure). Excludes `nodeId`.
- */
-function getRelatedNodeIdsForHover(tree: TreeNode, nodeId: string): Set<string> {
-  if (!findNode(tree, nodeId)) return EMPTY_FLOW_RELATED_IDS;
-  const ids = new Set<string>();
-  collectUpstreamSupplyIds(tree, nodeId, ids);
-  return ids;
-}
-
 /**
  * Add missing {@link InputEdge} rows so each recipe input is either from the tree parent or has an edge.
  * Older charts and some trees only had pool semantics in {@link computeFlowRates}; without edges, belt
@@ -1173,14 +1028,6 @@ function synthesizeMissingInputEdges(tree: TreeNode): TreeNode {
 
   visit(tree);
   return out;
-}
-
-function replaceNode(tree: TreeNode, nodeId: string, replacer: (t: TreeNode) => TreeNode): TreeNode {
-  if (tree.id === nodeId) return replacer(tree);
-  return {
-    ...tree,
-    children: tree.children.map((c) => replaceNode(c, nodeId, replacer)),
-  };
 }
 
 function updateChildBeltInTree(
@@ -1392,7 +1239,6 @@ function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSe
 
   for (let sliceIdx = 0; sliceIdx < slices.length; sliceIdx++) {
     const sliceNodes = slices[sliceIdx]!;
-    const prevSlice = sliceIdx > 0 ? slices[sliceIdx - 1]! : [];
 
     for (const node of sliceNodes) {
       if (node.node.isRaw || !node.node.recipeKey) {
@@ -1621,18 +1467,7 @@ function satisfyStorageReserveForItem(
   return t;
 }
 
-function nodeOutputFromFlow(
-  flowRates: Map<string, FlowRateData | { parentSending: number }>,
-  nodeId: string
-): number {
-  const fd = flowRates.get(nodeId);
-  if (!fd) return 0;
-  if ("currentOutput" in fd) return (fd as FlowRateData).currentOutput ?? 0;
-  if ("parentSending" in fd) return (fd as { parentSending: number }).parentSending;
-  return 0;
-}
-
-/** Max output if fully fed (machines) or extractor theoretical (raw). Do not use {@link nodeOutputFromFlow} for scale-up decisions — it uses utilization and causes runaway machine counts. */
+/** Max output if fully fed (machines) or extractor theoretical (raw). Do not use `currentOutput` from flow rates for scale-up — it reflects utilization and can cause runaway machine counts. */
 function nodeTheoreticalMaxOutputFromFlow(
   flowRates: Map<string, FlowRateData | { parentSending: number }>,
   nodeId: string
@@ -1957,39 +1792,61 @@ function getDeepestDescendantId(root: TreeNode): string {
   return cur.id;
 }
 
+/** One-shot read from localStorage for initial `useState` (avoids setState in mount effects). */
+function readPersistedFlowChartBoot(): {
+  charts: SavedChart[];
+  tree: TreeNode;
+  currentChartId: string | null;
+  currentChartName: string;
+  storageReserves: Record<string, number>;
+  autoBalanceEnabled: boolean;
+  preferredBeltKey: string;
+} {
+  const charts = getSavedCharts();
+  const lastId = getLastChartId();
+  const defaults = {
+    charts,
+    tree: EMPTY_TREE,
+    currentChartId: null as string | null,
+    currentChartName: "Untitled",
+    storageReserves: {} as Record<string, number>,
+    autoBalanceEnabled: false,
+    preferredBeltKey: "belt4",
+  };
+  if (!lastId) return defaults;
+  const loaded = loadChart(lastId);
+  if (!loaded) return defaults;
+  return {
+    charts,
+    tree: recalcTree(synthesizeMissingInputEdges(loaded.tree)),
+    currentChartId: lastId,
+    currentChartName: charts.find((x) => x.id === lastId)?.name ?? "Untitled",
+    storageReserves: loaded.storageReserves,
+    autoBalanceEnabled: loaded.autoBalanceEnabled,
+    preferredBeltKey: loaded.preferredBeltKey,
+  };
+}
+
 export function FlowChart() {
-  const [tree, setTree] = useState<TreeNode>(EMPTY_TREE);
-  const [currentChartId, setCurrentChartId] = useState<string | null>(null);
-  const [currentChartName, setCurrentChartName] = useState<string>("Untitled");
-  const [charts, setCharts] = useState<SavedChart[]>([]);
+  const [boot] = useState(() => readPersistedFlowChartBoot());
+  const [tree, setTree] = useState(boot.tree);
+  const [currentChartId, setCurrentChartId] = useState(boot.currentChartId);
+  const [currentChartName, setCurrentChartName] = useState(boot.currentChartName);
+  const [charts, setCharts] = useState(boot.charts);
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  /** Set in the menu button click handler (not during render) for portal positioning */
+  const [menuDropdownAnchor, setMenuDropdownAnchor] = useState<{ top: number; right: number } | null>(
+    null
+  );
   const [buildInventoryOpen, setBuildInventoryOpen] = useState(false);
   /** Default horizontal; vertical layout kept in menu for now (deprecated path). */
   const [layout, setLayout] = useState<"vertical" | "horizontal">("horizontal");
   const [separateAction, setSeparateAction] = useState<(() => void) | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const [storageReserves, setStorageReserves] = useState<Record<string, number>>({});
-  const [autoBalanceEnabled, setAutoBalanceEnabled] = useState(false);
-  const [preferredBeltKey, setPreferredBeltKey] = useState("belt4");
-
-  useEffect(() => {
-    const saved = getSavedCharts();
-    setCharts(saved);
-    const lastId = getLastChartId();
-    if (lastId) {
-      const loaded = loadChart(lastId);
-      if (loaded) {
-        setTree(recalcTree(synthesizeMissingInputEdges(loaded.tree)));
-        setStorageReserves(loaded.storageReserves);
-        setAutoBalanceEnabled(loaded.autoBalanceEnabled);
-        setPreferredBeltKey(loaded.preferredBeltKey);
-        const c = saved.find((x) => x.id === lastId);
-        setCurrentChartId(lastId);
-        setCurrentChartName(c?.name ?? "Untitled");
-      }
-    }
-  }, []);
+  const [storageReserves, setStorageReserves] = useState<Record<string, number>>(boot.storageReserves);
+  const [autoBalanceEnabled, setAutoBalanceEnabled] = useState(boot.autoBalanceEnabled);
+  const [preferredBeltKey, setPreferredBeltKey] = useState(boot.preferredBeltKey);
 
   const loadChartById = useCallback((id: string) => {
     const loaded = loadChart(id);
@@ -2185,8 +2042,11 @@ export function FlowChart() {
 
   const [flowHoverNodeId, setFlowHoverNodeId] = useState<string | null>(null);
   const [flowPinnedNodeId, setFlowPinnedNodeId] = useState<string | null>(null);
+  /** Ignore pin if that node no longer exists (no effect needed — derived here). */
+  const effectiveFlowPin =
+    flowPinnedNodeId && findNode(tree, flowPinnedNodeId) ? flowPinnedNodeId : null;
   /** Pinned node locks the branch highlight; hover only applies when nothing is pinned */
-  const flowFocusNodeId = flowPinnedNodeId ?? flowHoverNodeId;
+  const flowFocusNodeId = effectiveFlowPin ?? flowHoverNodeId;
   const flowFocusRelatedIds = useMemo(
     () =>
       flowFocusNodeId ? getRelatedNodeIdsForHover(tree, flowFocusNodeId) : EMPTY_FLOW_RELATED_IDS,
@@ -2194,17 +2054,12 @@ export function FlowChart() {
   );
   const toggleFlowPin = useCallback((id: string) => {
     setFlowPinnedNodeId((prev) => {
-      if (prev === id) return null;
-      if (prev != null) return prev;
+      const p = prev && findNode(tree, prev) ? prev : null;
+      if (p === id) return null;
+      if (p != null) return p;
       return id;
     });
-  }, []);
-
-  useEffect(() => {
-    if (flowPinnedNodeId && !findNode(tree, flowPinnedNodeId)) {
-      setFlowPinnedNodeId(null);
-    }
-  }, [tree, flowPinnedNodeId]);
+  }, [tree]);
 
   const buildInventory = useMemo(() => computeBuildInventory(tree), [tree]);
 
@@ -2290,6 +2145,11 @@ export function FlowChart() {
     [preferredBeltKey]
   );
 
+  const closeMenu = useCallback(() => {
+    setMenuDropdownAnchor(null);
+    setMenuOpen(false);
+  }, []);
+
   const storageStrip = (
     <StorageStrip
       rows={storageRows}
@@ -2325,7 +2185,20 @@ export function FlowChart() {
           <button
             ref={menuButtonRef}
             type="button"
-            onClick={() => setMenuOpen((o) => !o)}
+            onClick={() => {
+              if (menuOpen) {
+                closeMenu();
+              } else {
+                const rect = menuButtonRef.current?.getBoundingClientRect();
+                if (rect && typeof window !== "undefined") {
+                  setMenuDropdownAnchor({
+                    top: rect.bottom + 8,
+                    right: window.innerWidth - rect.right,
+                  });
+                }
+                setMenuOpen(true);
+              }
+            }}
             className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
             aria-label="Menu"
           >
@@ -2336,20 +2209,17 @@ export function FlowChart() {
           {menuOpen &&
             typeof document !== "undefined" &&
             createPortal(
-              (() => {
-                const rect = menuButtonRef.current?.getBoundingClientRect();
-                return (
-                  <>
+              <>
                     <div
                       className="fixed inset-0 z-40"
-                      onClick={() => setMenuOpen(false)}
+                      onClick={closeMenu}
                       aria-hidden="true"
                     />
                     <div
                       className="fixed z-50 w-64 max-w-[calc(100vw-2rem)] rounded-xl border-2 border-zinc-700 bg-zinc-900 p-2 shadow-xl"
                       style={
-                        rect
-                          ? { top: rect.bottom + 8, right: window.innerWidth - rect.right }
+                        menuDropdownAnchor
+                          ? { top: menuDropdownAnchor.top, right: menuDropdownAnchor.right }
                           : undefined
                       }
                     >
@@ -2358,7 +2228,7 @@ export function FlowChart() {
                     type="button"
                     onClick={() => {
                       setBuildInventoryOpen(true);
-                      setMenuOpen(false);
+                      closeMenu();
                     }}
                     className="mb-2 block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800"
                   >
@@ -2370,7 +2240,7 @@ export function FlowChart() {
                   onChange={(e) => {
                     const id = e.target.value;
                     if (id && id !== "__unsaved__") loadChartById(id);
-                    setMenuOpen(false);
+                    closeMenu();
                   }}
                   className="mb-2 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm text-zinc-200"
                 >
@@ -2384,14 +2254,14 @@ export function FlowChart() {
                 <div className="mb-2 flex gap-1 rounded-lg border border-zinc-700 p-1">
                   <button
                     type="button"
-                    onClick={() => { setLayout("vertical"); setMenuOpen(false); }}
+                    onClick={() => { setLayout("vertical"); closeMenu(); }}
                     className={`flex-1 rounded px-2 py-1.5 text-xs font-medium transition ${layout === "vertical" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}
                   >
                     ↓ Vertical
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setLayout("horizontal"); setMenuOpen(false); }}
+                    onClick={() => { setLayout("horizontal"); closeMenu(); }}
                     className={`flex-1 rounded px-2 py-1.5 text-xs font-medium transition ${layout === "horizontal" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}
                   >
                     → Horizontal
@@ -2429,21 +2299,21 @@ export function FlowChart() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => { handleNewChart(); setMenuOpen(false); }}
+                  onClick={() => { handleNewChart(); closeMenu(); }}
                   className="mb-1 block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800"
                 >
                   New
                 </button>
                 <button
                   type="button"
-                  onClick={() => { handleSave(); setMenuOpen(false); }}
+                  onClick={() => { handleSave(); closeMenu(); }}
                   className="mb-1 block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800"
                 >
                   Save
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setSaveAsOpen(true); setMenuOpen(false); }}
+                  onClick={() => { setSaveAsOpen(true); closeMenu(); }}
                   className="mb-1 block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-300 hover:bg-zinc-800"
                 >
                   Save as
@@ -2451,16 +2321,14 @@ export function FlowChart() {
                 {currentChartId && charts.some((c) => c.id === currentChartId) && (
                   <button
                     type="button"
-                    onClick={() => { handleDeleteChart(currentChartId); setMenuOpen(false); }}
+                    onClick={() => { handleDeleteChart(currentChartId); closeMenu(); }}
                     className="block w-full rounded-lg px-3 py-2 text-left text-sm text-red-400 hover:bg-zinc-800 hover:text-red-300"
                   >
                     Delete
                   </button>
                 )}
                     </div>
-                  </>
-                );
-              })(),
+              </>,
               document.body
             )
           }
@@ -2579,6 +2447,11 @@ export function FlowChart() {
           onFlowNodeHoverEnter={setFlowHoverNodeId}
           onFlowNodeHoverLeave={() => setFlowHoverNodeId(null)}
           onFlowNodePinToggle={toggleFlowPin}
+          onReorderSliceSiblings={(parentId, activeId, insertBeforeId) => {
+            setTree((t) =>
+              recalcTree(synthesizeMissingInputEdges(reorderSiblingBefore(t, parentId, activeId, insertBeforeId)))
+            );
+          }}
         />
       ) : (
         <TreeLevel
@@ -2660,6 +2533,8 @@ interface TreeLevelProps {
   onFlowNodeHoverLeave?: () => void;
   /** Click a machine card to pin its supply branch until cleared */
   onFlowNodePinToggle?: (treeNodeId: string) => void;
+  /** Horizontal slices: reorder siblings under the same parent (vertical only). */
+  onReorderSliceSiblings?: (parentId: string, activeId: string, insertBeforeId: string | null) => void;
 }
 
 function TreeLevel({
@@ -3374,7 +3249,6 @@ function TreeLevelSlices(props: TreeLevelProps) {
   const {
     tree,
     flowRates,
-    machineOptions,
     onUpdateNode,
     onSelectNodeMachine,
     onAddMachine,
@@ -3387,13 +3261,14 @@ function TreeLevelSlices(props: TreeLevelProps) {
     onFlowNodeHoverEnter,
     onFlowNodeHoverLeave,
     onFlowNodePinToggle,
+    onReorderSliceSiblings,
   } = props;
 
   const [addMachineOpen, setAddMachineOpen] = useState(false);
   const [addMachineParent, setAddMachineParent] = useState<TreeNode | null>(null);
   const [addMachineInsertIndex, setAddMachineInsertIndex] = useState<number | undefined>(undefined);
   const [addMachineSliceIdx, setAddMachineSliceIdx] = useState(0);
-  const [addMachinePrevSlice, setAddMachinePrevSlice] = useState<TreeNode[] | null>(null);
+  const [, setAddMachinePrevSlice] = useState<TreeNode[] | null>(null);
   const [addMachineAllPrevSlices, setAddMachineAllPrevSlices] = useState<TreeNode[][] | null>(null);
   const [headerExpanded, setHeaderExpanded] = useState<Set<number>>(new Set());
   const [outputExpanded, setOutputExpanded] = useState<Set<number>>(new Set());
@@ -3481,13 +3356,12 @@ function TreeLevelSlices(props: TreeLevelProps) {
     <div className="flex h-full min-h-full flex-row items-stretch gap-0">
       {slices.map((sliceNodes, sliceIdx) => {
         const prevSlice = sliceIdx > 0 ? slices[sliceIdx - 1]! : null;
-        const parentOutputItemKey = prevSlice?.[0]?.node.outputItemKey;
         const hasInputs = sliceIdx > 0 && prevSlice && prevSlice.length > 0;
 
         const inputsByItem = new Map<KeyName, { rate: number; consumers: SliceBeltRow[] }>();
         if (hasInputs && sliceIdx > 0) {
           const allPrevSlices = slices.slice(0, sliceIdx);
-          let totalRateByItem = new Map<KeyName, number>();
+          const totalRateByItem = new Map<KeyName, number>();
           for (const slice of allPrevSlices) {
             for (const node of slice) {
               const fd = flowRates.get(node.id) as FlowRateData | undefined;
@@ -3512,18 +3386,14 @@ function TreeLevelSlices(props: TreeLevelProps) {
                 const fromParent = !edge && (consumer.parentId ? findNode(tree, consumer.parentId) : null)?.node.outputItemKey === itemKey;
                 let beltKey = "belt1";
                 let beltCapacity = 0;
-                let parentSending = 0;
                 if (edge) {
                   beltKey = edge.beltKey;
                   const b = getBelt(edge.beltKey);
                   beltCapacity = b?.rate ?? 60;
-                  const prodFd = flowRates.get(edge.producerId) as FlowRateData | undefined;
-                  parentSending = prodFd && "currentOutput" in prodFd ? prodFd.currentOutput : 0;
                 } else if (fromParent) {
                   beltKey = consumer.incomingBeltKey ?? "belt1";
                   const consumerFd = flowRates.get(consumer.id) as FlowRateData | undefined;
                   beltCapacity = consumerFd && "beltCapacity" in consumerFd ? consumerFd.beltCapacity : 0;
-                  parentSending = consumerFd && "parentSending" in consumerFd ? consumerFd.parentSending : 0;
                 }
                 const consumerFd = flowRates.get(consumer.id) as FlowRateData | undefined;
                 const inp = consumerFd?.inputs?.find((i) => i.itemKey === itemKey);
@@ -3604,7 +3474,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
                     <span>INPUT</span>
                   )}
                 </div>
-                <div className="h-[5.5rem] overflow-hidden px-2 py-2">
+                <div className="h-22 overflow-hidden px-2 py-2">
                   {hasMoreThanTwoLines && isExpanded ? (
                     <div className="h-full" aria-hidden />
                   ) : (
@@ -3650,9 +3520,14 @@ function TreeLevelSlices(props: TreeLevelProps) {
                 )}
               </div>
 
-              {/* Body: machines with add above/below */}
-              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 py-3">
-                {sliceNodes.flatMap((node, i) => {
+              {/* Body: machines grouped by parent (branch stacks), column vertically centered */}
+              <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-8 overflow-y-auto py-3">
+                {groupSliceNodesByParent(sliceNodes).map((branchGroup, branchIdx) => (
+                  <SliceBranchReorderGroup
+                    key={branchGroup.parentId ?? `slice-${sliceIdx}-root-${branchIdx}`}
+                    siblingIds={branchGroup.nodes.map((n) => n.id)}
+                  >
+                {branchGroup.nodes.flatMap((node, i) => {
                   const allPrevSlices = slices.slice(0, sliceIdx);
                   const opts = childOptions(node, sliceIdx, allPrevSlices);
                   const parent = node.parentId ? findNode(tree, node.parentId) : null;
@@ -3675,7 +3550,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
                         ? getMachineOptionsForInput(parent.node.outputItemKey)
                         : [];
                   const producesOpts = allProduces.filter((o) => o.buildingKey === node.node.buildingKey);
-                  const prevNode = i > 0 ? sliceNodes[i - 1] : null;
+                  const prevNode = i > 0 ? branchGroup.nodes[i - 1]! : null;
                   const canMerge =
                     i > 0 &&
                     prevNode &&
@@ -3686,8 +3561,9 @@ function TreeLevelSlices(props: TreeLevelProps) {
                     prevNode.node.outputItemKey === node.node.outputItemKey;
                   return [
                     i > 0 ? (
-                      <div
+                      <SliceBranchShiftedChrome
                         key={`add-merge-${node.id}`}
+                        siblingIndex={i}
                         className="flex shrink-0 items-center gap-1"
                       >
                         {canMerge && onMergeNodes ? (
@@ -3716,9 +3592,25 @@ function TreeLevelSlices(props: TreeLevelProps) {
                         >
                           +
                         </button>
-                      </div>
+                      </SliceBranchShiftedChrome>
                     ) : null,
-                    <div key={node.id} className="flex shrink-0 flex-col items-center gap-2">
+                    <HorizontalSliceMachineReorder
+                      key={node.id}
+                      disabled={
+                        !branchGroup.parentId ||
+                        branchGroup.nodes.length < 2 ||
+                        !onReorderSliceSiblings
+                      }
+                      parentId={branchGroup.parentId}
+                      nodeId={node.id}
+                      siblingIndex={i}
+                      onReorderComplete={(insertBeforeId) => {
+                        if (branchGroup.parentId && onReorderSliceSiblings) {
+                          onReorderSliceSiblings(branchGroup.parentId, node.id, insertBeforeId);
+                        }
+                      }}
+                    >
+                    <div data-slice-machine-row={node.id} className="flex shrink-0 flex-col items-center gap-2">
                       {(() => {
                         const beltsForNode = beltsByNodeId.get(node.id) ?? [];
                         if (beltsForNode.length === 0) return null;
@@ -3805,9 +3697,12 @@ function TreeLevelSlices(props: TreeLevelProps) {
                           onFlowNodePinToggle ? () => onFlowNodePinToggle(node.id) : undefined
                         }
                       />
-                    </div>,
+                    </div>
+                    </HorizontalSliceMachineReorder>,
                   ].filter(Boolean);
                 })}
+                  </SliceBranchReorderGroup>
+                ))}
                 <button
                   type="button"
                   onClick={() => {
@@ -3860,7 +3755,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
                         <span>OUTPUT</span>
                       )}
                     </div>
-                    <div className="h-[5.5rem] overflow-hidden px-2 py-2">
+                    <div className="h-22 overflow-hidden px-2 py-2">
                       {outputsByItem.size > 2 && outputExpanded.has(sliceIdx) ? (
                         <div className="h-full" aria-hidden />
                       ) : (
@@ -3874,7 +3769,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
                       )}
                     </div>
                     {outputsByItem.size > 2 && outputExpanded.has(sliceIdx) && (
-                      <div className="absolute bottom-0 left-0 right-0 z-50 flex min-h-[5.5rem] max-h-[85vh] flex-col gap-1.5 overflow-y-auto border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
+                      <div className="absolute bottom-0 left-0 right-0 z-50 flex min-h-22 max-h-[85vh] flex-col gap-1.5 overflow-y-auto border border-zinc-700 bg-zinc-900 p-2 shadow-xl">
                         <button
                           type="button"
                           onClick={() => setOutputExpanded((prev) => { const next = new Set(prev); next.delete(sliceIdx); return next; })}
@@ -4021,7 +3916,6 @@ function FlowNodeCard({
   const [producesModalOpen, setProducesModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
 
-  const perMachineOutput = node.outputPerMachine * (node.clockPercent / 100);
   const allocatedInput = (node.inputPerMachine ?? 0) * node.count;
   const hasFullFlowData = flowData && "beltCapacity" in flowData;
   const isUnderfed =
@@ -4054,7 +3948,7 @@ function FlowNodeCard({
         hover:border-zinc-600
         ${widthClass}
         ${flowHoverHighlightClass(flowHighlightSelf, flowHighlightRelated)}
-        ${isOpen ? "border-amber-500/60" : isUnderfed ? "border-amber-500/50 !bg-amber-900/30" : "border-zinc-800"}
+        ${isOpen ? "border-amber-500/60" : isUnderfed ? "border-amber-500/50 bg-amber-900/30!" : "border-zinc-800"}
       `}
     >
       <div className="flex items-start justify-between gap-2">
@@ -4063,7 +3957,7 @@ function FlowNodeCard({
         </div>
         {totalPowerShards > 0 && (
           <div
-            className="flex max-w-[3.25rem] shrink-0 flex-wrap justify-end gap-0.5 pt-px"
+            className="flex max-w-13 shrink-0 flex-wrap justify-end gap-0.5 pt-px"
             title={`${totalPowerShards} power shard${totalPowerShards !== 1 ? "s" : ""} (${node.count} machine${node.count !== 1 ? "s" : ""} × ${shardsPerMachine} shard${shardsPerMachine !== 1 ? "s" : ""} each @ ${node.clockPercent}%)`}
             aria-label={`${totalPowerShards} power shards`}
           >
@@ -4209,7 +4103,6 @@ function FlowNodeCard({
             onUpdate={onUpdate}
             onSelectMachine={(opt) => { onSelectMachine(opt); setEditModalOpen(false); }}
             onClose={() => setEditModalOpen(false)}
-            onSeparate={onSeparate ? () => { onSeparate(); setEditModalOpen(false); } : undefined}
             onRemove={onRemove ? () => { onRemove(); setEditModalOpen(false); } : undefined}
           />
         )}
@@ -4282,7 +4175,7 @@ function FlowNodeCard({
         hover:border-zinc-600
         ${widthClass}
         ${flowHoverHighlightClass(flowHighlightSelf, flowHighlightRelated)}
-        ${isOpen ? "border-amber-500/60 ring-2 ring-amber-500/20" : isUnderfed ? "border-amber-500/50 !bg-amber-900/30" : "border-zinc-800"}
+        ${isOpen ? "border-amber-500/60 ring-2 ring-amber-500/20" : isUnderfed ? "border-amber-500/50 bg-amber-900/30!" : "border-zinc-800"}
       `}
     >
       <div className="min-w-0">
@@ -4614,7 +4507,6 @@ function FlowNodeCard({
           onUpdate={onUpdate}
           onSelectMachine={(opt) => { onSelectMachine(opt); setEditModalOpen(false); }}
           onClose={() => setEditModalOpen(false)}
-          onSeparate={onSeparate ? () => { onSeparate(); setEditModalOpen(false); } : undefined}
           onRemove={onRemove ? () => { onRemove(); setEditModalOpen(false); } : undefined}
         />
       )}
