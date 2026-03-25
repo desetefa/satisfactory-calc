@@ -87,12 +87,13 @@ export function QuickBuildModal({
       >
         <div className="shrink-0 border-b border-zinc-800 px-4 py-3">
           <h2 id="quick-build-title" className="text-base font-semibold text-zinc-100">
-            Quick build from product
+            Quick build line
           </h2>
           <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-            Pick an item and <span className="text-zinc-400">recipe</span>. Builds for{" "}
-            <span className="text-zinc-400">one machine at 100%</span> (max throughput for that recipe), all upstream
-            machines scaled to feed it, then auto-balance (belts / scale).
+            Choose an <span className="text-zinc-400">end product</span> and <span className="text-zinc-400">recipe</span>.
+            The planner lays out a <span className="text-zinc-400">full production line</span> (that machine at 100% plus every
+            upstream step to raw resources), then <span className="text-zinc-400">auto-balances</span> belts and machine
+            counts so inputs match.
           </p>
           {hasExistingChart && (
             <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-950/40 px-2 py-1.5 text-xs text-amber-200/90">
@@ -241,16 +242,40 @@ export function QuickBuildModal({
   );
 }
 
-export function QuickBuildFab({ onClick, title }: { onClick: () => void; title?: string }) {
+const QUICK_BUILD_TITLE =
+  "Pick a product and recipe: builds the full line (one machine at 100% for that step, all upstream scaled), then auto-balances belts and counts.";
+
+/** Dashed control for the flow canvas (same family as “Add slice” / “Add machine”). */
+export function QuickBuildLineButton({
+  onClick,
+  className = "",
+  size = "default",
+}: {
+  onClick: () => void;
+  className?: string;
+  /** `compact` = smaller, for tight rows */
+  size?: "default" | "compact";
+}) {
+  const isCompact = size === "compact";
   return (
     <button
       type="button"
       onClick={onClick}
-      title={title ?? "Quick build from product"}
-      aria-label={title ?? "Quick build from product"}
-      className="pointer-events-auto fixed right-[calc(16rem+1.25rem)] top-1/2 z-[70] flex h-14 w-14 -translate-y-1/2 items-center justify-center rounded-full border-2 border-amber-500/45 bg-zinc-950/95 text-3xl font-light leading-none text-amber-400 shadow-xl shadow-black/40 backdrop-blur-sm transition hover:scale-105 hover:border-amber-400 hover:bg-zinc-900 hover:text-amber-300"
+      title={QUICK_BUILD_TITLE}
+      aria-label="Quick build line: full production chain from a product"
+      className={`flex shrink-0 flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed border-zinc-600 text-zinc-400 transition hover:border-amber-500/40 hover:bg-zinc-800/80 ${
+        isCompact ? "min-h-[100px] min-w-[112px] px-3 py-3" : "min-h-[120px] min-w-[140px] px-4 py-4"
+      } ${className}`}
     >
-      +
+      <span className={`font-light text-amber-400/90 ${isCompact ? "text-2xl" : "text-3xl"}`}>+</span>
+      <span className={`text-center font-medium text-zinc-300 ${isCompact ? "text-[11px] leading-tight" : "text-xs"}`}>
+        Quick build line
+      </span>
+      <span
+        className={`max-w-[9.5rem] text-center leading-snug text-zinc-500 ${isCompact ? "text-[9px]" : "text-[10px]"}`}
+      >
+        Product → full chain, auto-balanced
+      </span>
     </button>
   );
 }

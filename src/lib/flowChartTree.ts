@@ -69,7 +69,8 @@ export function groupSliceNodesByParent(
 
 /**
  * Who supplies `itemKey` to this consumer: tree parent, explicit input edge, or (fallback)
- * any node in an earlier horizontal slice that outputs that item (matches add-machine / pool semantics).
+ * nodes that output that item in the same horizontal slice **before** this node (pool order),
+ * plus any producers in the nearest earlier slice (matches horizontal slice pool order in the flow sim).
  */
 export function resolveSupplierIds(tree: TreeNode, consumer: TreeNode, itemKey: KeyName): string[] {
   const parent = consumer.parentId ? findNode(tree, consumer.parentId) : null;
@@ -84,15 +85,31 @@ export function resolveSupplierIds(tree: TreeNode, consumer: TreeNode, itemKey: 
 
   const slices = getFlowSlices(tree);
   const consumerSlice = slices.findIndex((sl) => sl.some((n) => n.id === consumer.id));
-  if (consumerSlice <= 0) return [];
+  if (consumerSlice < 0) return [];
 
   const found: string[] = [];
-  for (let s = consumerSlice - 1; s >= 0; s--) {
-    for (const n of slices[s]!) {
+  const sl = slices[consumerSlice]!;
+  const consumerIdx = sl.findIndex((n) => n.id === consumer.id);
+  if (consumerIdx > 0) {
+    for (let i = 0; i < consumerIdx; i++) {
+      const n = sl[i]!;
       if (n.node.outputItemKey === itemKey) found.push(n.id);
     }
-    if (found.length > 0) break;
   }
+
+  if (consumerSlice > 0) {
+    for (let s = consumerSlice - 1; s >= 0; s--) {
+      const sliceFound: string[] = [];
+      for (const n of slices[s]!) {
+        if (n.node.outputItemKey === itemKey) sliceFound.push(n.id);
+      }
+      if (sliceFound.length > 0) {
+        found.push(...sliceFound);
+        break;
+      }
+    }
+  }
+
   return [...new Set(found)];
 }
 

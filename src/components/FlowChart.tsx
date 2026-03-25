@@ -2,6 +2,8 @@
 
 import {
   useState,
+  useEffect,
+  startTransition,
   useCallback,
   useMemo,
   useRef,
@@ -35,8 +37,9 @@ import {
   getItemDisplayName,
   type ItemDisplayDensity,
 } from "@/lib/itemDisplayName";
-import { QuickBuildFab, QuickBuildModal } from "@/components/QuickBuildModal";
+import { QuickBuildLineButton, QuickBuildModal } from "@/components/QuickBuildModal";
 import { DraggablePercent } from "@/components/flow-chart/DraggablePercent";
+import { MachineClocksModal } from "@/components/flow-chart/MachineClocksModal";
 import {
   HorizontalSliceMachineReorder,
   SliceBranchReorderGroup,
@@ -48,7 +51,11 @@ import {
   type TreeNode,
   createFlowNode,
   createTreeNode,
+  getAverageClockPercent,
   getEffectiveOutputPerMachine,
+  getMachineClocks,
+  getTotalClockFraction,
+  totalPowerShardsForNode,
 } from "@/lib/flowChartModel";
 import { planProductionFromTarget } from "@/lib/productionPlanner";
 import { productionPlanToSliceTree } from "@/lib/plannerToTree";
@@ -769,11 +776,12 @@ function EditNodeModal({
               </div>
             </div>
             <div>
-              <label className="mb-1 block text-xs text-zinc-500">Clock %</label>
+              <label className="mb-1 block text-xs text-zinc-500">Clock % (avg / set all)</label>
               <DraggablePercent
-                value={node.clockPercent}
+                value={getAverageClockPercent(node)}
                 onChange={(v) => onUpdate({ clockPercent: v })}
                 className="block w-16 rounded border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-center text-sm text-zinc-100"
+                title="Sets every machine to this % (clears per-machine grid)"
               />
             </div>
             {node.isRaw && (
@@ -866,94 +874,131 @@ type StorageStripRow = {
   reservePerMin: number;
 };
 
+/** Full-height edge control: same bar for expand (chevron ←) and collapse (chevron →). */
+function StoragePanelEdgeBar({
+  mode,
+  onClick,
+  ariaLabel,
+  title: titleAttr,
+}: {
+  mode: "expand" | "collapse";
+  onClick: () => void;
+  ariaLabel: string;
+  title: string;
+}) {
+  const edge = "border-l border-zinc-800 shadow-[inset_1px_0_0_0_rgba(39,39,42,0.6)]";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-full min-h-0 w-10 shrink-0 flex-col items-center justify-center gap-1 bg-[#101010] py-6 text-zinc-500 transition hover:bg-zinc-900/90 hover:text-zinc-300 ${edge}`}
+      aria-label={ariaLabel}
+      title={titleAttr}
+    >
+      <svg className="h-5 w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+        {mode === "expand" ? (
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+        ) : (
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        )}
+      </svg>
+      <span
+        className="select-none text-[9px] font-semibold uppercase tracking-widest text-zinc-600"
+        style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+      >
+        Storage
+      </span>
+    </button>
+  );
+}
+
 function StorageStrip({
   rows,
   onReserveDelta,
   onOptimizeRow,
+  panelExpanded,
+  onExpandPanel,
+  onDismiss,
 }: {
   rows: StorageStripRow[];
   onReserveDelta: (itemKey: KeyName, delta: number) => void;
   onOptimizeRow: (itemKey: KeyName) => void;
+  panelExpanded: boolean;
+  onExpandPanel: () => void;
+  onDismiss: () => void;
 }) {
   return (
     <aside
-      className="flex h-full min-h-0 w-64 shrink-0 flex-col border-l border-zinc-800 bg-[#101010] backdrop-blur-md"
+      className="flex h-full min-h-0 w-64 min-w-64 shrink-0 flex-row border-l border-zinc-800 bg-[#101010] backdrop-blur-md"
       aria-label="Storage"
     >
-      <div className="shrink-0 border-b border-zinc-800 px-3 py-4">
-        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500">Storage</h2>
-        <p className="mt-1 text-xs leading-snug text-zinc-600">
-          Surplus vs downstream use. +/− set a personal reserve (items/min); ✕ trims waste (machines first,
-          then clock).
-        </p>
-      </div>
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
-        {rows.length === 0 ? (
-          <p className="text-sm text-zinc-600">Nothing in storage</p>
-        ) : (
-          <ul className="space-y-3">
-            {rows.map(({ itemKey, itemName, surplusRate, reservePerMin }) => (
-              <li
-                key={itemKey}
-                className="flex flex-col gap-1.5 border-b border-zinc-800/80 pb-3 last:border-0 last:pb-0"
-              >
-                <span className="text-sm font-medium leading-tight text-zinc-200">{itemName}</span>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="font-mono text-[11px] text-amber-400/90" title="Current surplus">
-                    +{formatRate(surplusRate)}/min
-                  </span>
-                  {reservePerMin > 0 && (
-                    <span className="font-mono text-[11px] text-teal-400/90" title="Target extra reserve">
-                      r{formatRate(reservePerMin)}/min
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col" inert={panelExpanded ? undefined : true}>
+        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-3 py-3">
+          {rows.length === 0 ? (
+            <p className="text-sm text-zinc-600">Nothing in storage</p>
+          ) : (
+            <ul className="space-y-3">
+              {rows.map(({ itemKey, itemName, surplusRate, reservePerMin }) => (
+                <li
+                  key={itemKey}
+                  className="flex flex-col gap-1.5 border-b border-zinc-800/80 pb-3 last:border-0 last:pb-0"
+                >
+                  <span className="text-sm font-medium leading-tight text-zinc-200">{itemName}</span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="font-mono text-[11px] text-amber-400/90" title="Current surplus">
+                      +{formatRate(surplusRate)}/min
                     </span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    title="Increase reserve by 1/min (scale up first producer)"
-                    onClick={() => onReserveDelta(itemKey, 1)}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-sm font-medium text-zinc-200 hover:border-amber-500/50 hover:bg-zinc-700"
-                  >
-                    +
-                  </button>
-                  <button
-                    type="button"
-                    title="Decrease reserve by 1/min"
-                    onClick={() => onReserveDelta(itemKey, -1)}
-                    disabled={reservePerMin <= 0}
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-sm font-medium text-zinc-200 hover:border-amber-500/50 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-30"
-                  >
-                    −
-                  </button>
-                  <button
-                    type="button"
-                    title="Clear reserve and remove surplus (whole machines first, then lower clock)"
-                    onClick={() => onOptimizeRow(itemKey)}
-                    className="ml-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-xs font-bold text-zinc-400 hover:border-red-500/40 hover:bg-red-950/40 hover:text-red-300"
-                  >
-                    ✕
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
+                    {reservePerMin > 0 && (
+                      <span className="font-mono text-[11px] text-teal-400/90" title="Target extra reserve">
+                        r{formatRate(reservePerMin)}/min
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      title="Increase reserve by 1/min (scale up first producer)"
+                      onClick={() => onReserveDelta(itemKey, 1)}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-sm font-medium text-zinc-200 hover:border-amber-500/50 hover:bg-zinc-700"
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      title="Decrease reserve by 1/min"
+                      onClick={() => onReserveDelta(itemKey, -1)}
+                      disabled={reservePerMin <= 0}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-sm font-medium text-zinc-200 hover:border-amber-500/50 hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-30"
+                    >
+                      −
+                    </button>
+                    <button
+                      type="button"
+                      title="Clear reserve and remove surplus (whole machines first, then lower clock)"
+                      onClick={() => onOptimizeRow(itemKey)}
+                      className="ml-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-xs font-bold text-zinc-400 hover:border-red-500/40 hover:bg-red-950/40 hover:text-red-300"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </div>
+      <StoragePanelEdgeBar
+        mode={panelExpanded ? "collapse" : "expand"}
+        onClick={panelExpanded ? onDismiss : onExpandPanel}
+        ariaLabel={panelExpanded ? "Hide storage panel" : "Show storage panel"}
+        title={panelExpanded ? "Hide storage panel" : "Show storage panel"}
+      />
     </aside>
   );
 }
 
 function getAllNodes(tree: TreeNode): TreeNode[] {
   return [tree, ...tree.children.flatMap((c) => getAllNodes(c))];
-}
-
-/** Power shards slotted for overclock: 101–150% → 1, 151–200% → 2, 201–250% → 3 per machine. */
-function powerShardsForClockPercent(clockPercent: number): number {
-  if (clockPercent <= 100) return 0;
-  if (clockPercent <= 150) return 1;
-  if (clockPercent <= 200) return 2;
-  return 3;
 }
 
 type BuildInventoryResult = {
@@ -968,13 +1013,12 @@ function computeBuildInventory(tree: TreeNode): BuildInventoryResult | null {
   const buildingMap = new Map<string, { buildingName: string; count: number }>();
   let powerShards = 0;
   for (const t of getAllNodes(tree)) {
-    const { buildingKey, buildingName, count, outputItemKey, clockPercent } = t.node;
+    const { buildingKey, buildingName, count, outputItemKey } = t.node;
     if (!buildingKey || !outputItemKey) continue;
     const prev = buildingMap.get(buildingKey);
     if (prev) prev.count += count;
     else buildingMap.set(buildingKey, { buildingName, count });
-    const perMachine = powerShardsForClockPercent(clockPercent);
-    powerShards += perMachine * count;
+    powerShards += totalPowerShardsForNode(t.node);
   }
 
   const buildings = [...buildingMap.entries()]
@@ -986,8 +1030,8 @@ function computeBuildInventory(tree: TreeNode): BuildInventoryResult | null {
 
 /**
  * Add missing {@link InputEdge} rows so each recipe input is either from the tree parent or has an edge.
- * Older charts and some trees only had pool semantics in {@link computeFlowRates}; without edges, belt
- * dropdowns updated {@link TreeNode.incomingBeltKey} but flow math ignored it for those inputs.
+ * {@link resolveSupplierIds} includes same-slice suppliers (earlier in the slice) and previous slices, so
+ * pool-fed inputs get a {@link InputEdge} with {@link InputEdge.beltKey} and belt limits apply in the sim.
  */
 function synthesizeMissingInputEdges(tree: TreeNode): TreeNode {
   let out = tree;
@@ -1012,7 +1056,7 @@ function synthesizeMissingInputEdges(tree: TreeNode): TreeNode {
       const edge: InputEdge = {
         itemKey,
         producerId: suppliers[0]!,
-        beltKey: pickDefaultBelt(perMinute * t.node.count),
+        beltKey: pickDefaultBelt(perMinute * getTotalClockFraction(t.node)),
       };
       newEdges.push(edge);
       existingKeys.add(itemKey);
@@ -1063,16 +1107,50 @@ function updateInputEdgeBeltInTree(
 
 function updateNodeInTree(tree: TreeNode, nodeId: string, updates: Partial<FlowNode>): TreeNode {
   return replaceNode(tree, nodeId, (t) => {
-    const node = { ...t.node, ...updates };
+    const prev = t.node;
+    const merged = { ...prev, ...updates };
+    const node = merged;
+
+    if (updates.machineClockPercents !== undefined) {
+      const mcp = updates.machineClockPercents;
+      if (mcp.length === merged.count) {
+        node.machineClockPercents = mcp;
+        node.clockPercent = Math.round(mcp.reduce((a, b) => a + b, 0) / mcp.length);
+      }
+    } else if (updates.clockPercent !== undefined) {
+      node.machineClockPercents = undefined;
+    }
+
+    if (
+      updates.count !== undefined &&
+      updates.machineClockPercents === undefined &&
+      updates.clockPercent === undefined
+    ) {
+      if (prev.machineClockPercents?.length === prev.count) {
+        let arr = [...prev.machineClockPercents];
+        if (merged.count > prev.count) {
+          const fill = prev.clockPercent;
+          while (arr.length < merged.count) arr.push(fill);
+        } else {
+          arr = arr.slice(0, merged.count);
+        }
+        node.machineClockPercents = arr;
+        node.clockPercent = Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+      } else {
+        node.machineClockPercents = undefined;
+      }
+    }
+
     if (
       updates.count !== undefined ||
       updates.clockPercent !== undefined ||
+      updates.machineClockPercents !== undefined ||
       updates.outputPerMachine !== undefined ||
       updates.nodePurity !== undefined
     ) {
-      node.totalOutput =
-        getEffectiveOutputPerMachine(node) * (node.clockPercent / 100) * node.count;
+      node.totalOutput = getEffectiveOutputPerMachine(node) * getTotalClockFraction(node);
     }
+
     return { ...t, node };
   });
 }
@@ -1112,13 +1190,18 @@ function mergeNodesAsChild(
   const right = parent.children[rightIdx];
   if (left.node.outputItemKey !== right.node.outputItemKey) return tree;
   const combinedCount = left.node.count + right.node.count;
+  const lc = getMachineClocks(left.node);
+  const rc = getMachineClocks(right.node);
+  const mergedClocks = [...lc, ...rc];
+  const mergedAvg = Math.round(mergedClocks.reduce((a, b) => a + b, 0) / mergedClocks.length);
   let updated = replaceNode(tree, leftId, (l) => ({
     ...l,
     node: {
       ...l.node,
       count: combinedCount,
-      totalOutput:
-        getEffectiveOutputPerMachine(l.node) * (l.node.clockPercent / 100) * combinedCount,
+      machineClockPercents: mergedClocks,
+      clockPercent: mergedAvg,
+      totalOutput: getEffectiveOutputPerMachine(l.node) * mergedClocks.reduce((s, c) => s + c / 100, 0),
     },
     children: [...l.children, ...right.children.map((c) => ({ ...c, parentId: leftId }))],
   }));
@@ -1141,19 +1224,30 @@ function splitMergedNode(
   if (!node || node.node.count < 2) return tree;
   const leftCount = 1;
   const rightCount = node.node.count - 1;
+  const splitClocks = getMachineClocks(node.node);
+  const leftClocks = splitClocks.slice(0, 1);
+  const rightClocks = splitClocks.slice(1);
   const leftNode = {
     ...node.node,
     id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
     count: leftCount,
+    machineClockPercents: leftClocks.length === leftCount ? leftClocks : undefined,
+    clockPercent: leftClocks[0] ?? node.node.clockPercent,
     totalOutput:
-      getEffectiveOutputPerMachine(node.node) * (node.node.clockPercent / 100) * leftCount,
+      getEffectiveOutputPerMachine(node.node) * (leftClocks[0]! / 100),
   };
   const rightNode = {
     ...node.node,
     id: `node-${Date.now()}-${Math.random().toString(36).slice(2, 9)}-r`,
     count: rightCount,
+    machineClockPercents: rightClocks.length === rightCount ? rightClocks : undefined,
+    clockPercent:
+      rightClocks.length > 0
+        ? Math.round(rightClocks.reduce((a, b) => a + b, 0) / rightClocks.length)
+        : node.node.clockPercent,
     totalOutput:
-      getEffectiveOutputPerMachine(node.node) * (node.node.clockPercent / 100) * rightCount,
+      getEffectiveOutputPerMachine(node.node) *
+      rightClocks.reduce((s, c) => s + c / 100, 0),
   };
   const throughput = (rightNode.inputPerMachine ?? 0) * rightCount;
   const leftChild = createTreeNode(leftNode, parentId, node.children, node.incomingBeltKey);
@@ -1179,7 +1273,7 @@ export type FlowRateData = {
   parentSending: number;
   /** Belt capacity for this connection (items/min) */
   beltCapacity: number;
-  /** What this machine needs (inputPerMachine × count) - legacy single-input */
+  /** What this machine needs (recipe input/min × count × clock%) - legacy single-input */
   needsInput: number;
   /** What this machine actually receives (belt-limited, supply-limited) - legacy */
   receivesInput: number;
@@ -1197,7 +1291,7 @@ function getChildDemandForParentOutput(child: TreeNode, parentOutputItemKey: Key
   if (child.node.isRaw || !child.node.recipeKey) return 0;
   const inputs = getRecipeInputsPerMinute(child.node.recipeKey);
   const match = inputs.find((i) => i.itemKey === parentOutputItemKey);
-  const directNeed = (match?.perMinute ?? 0) * child.node.count;
+  const directNeed = (match?.perMinute ?? 0) * getTotalClockFraction(child.node);
 
   // Downstream demand: children of this node need our output; we need enough input to produce it
   if (child.children.length === 0) return directNeed;
@@ -1242,7 +1336,7 @@ function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSe
 
     for (const node of sliceNodes) {
       if (node.node.isRaw || !node.node.recipeKey) {
-        const out = getEffectiveOutputPerMachine(node.node) * (node.node.clockPercent / 100) * node.node.count;
+        const out = getEffectiveOutputPerMachine(node.node) * getTotalClockFraction(node.node);
         const key = node.node.outputItemKey;
         if (key) pools.set(key, (pools.get(key) ?? 0) + out);
         result.set(node.id, { parentSending: out });
@@ -1250,10 +1344,11 @@ function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSe
       }
 
       const recipeInputs = getRecipeInputsPerMinute(node.node.recipeKey);
+      const clockFrac = getTotalClockFraction(node.node);
       const inputs: FlowInputData[] = recipeInputs.map(({ itemKey, perMinute }) => ({
         itemKey,
         itemName: getItemName(itemKey, "compact"),
-        needsInput: perMinute * node.node.count,
+        needsInput: perMinute * clockFrac,
         receivesInput: 0,
       }));
 
@@ -1282,7 +1377,8 @@ function computeFlowRates(tree: TreeNode): Map<string, FlowRateData | { parentSe
         withNeeds.length > 0
           ? Math.min(1, ...withNeeds.map((i) => (i.needsInput > 0 ? i.receivesInput / i.needsInput : 1)))
           : 1;
-      const maxOutput = node.node.outputPerMachine * (node.node.clockPercent / 100) * node.node.count;
+      const maxOutput =
+        getEffectiveOutputPerMachine(node.node) * getTotalClockFraction(node.node);
       const currentOutput = maxOutput * utilization;
 
       const parent = node.parentId ? findNode(tree, node.parentId) : null;
@@ -1329,8 +1425,7 @@ function computeFlowBalanceMaps(
     } else if (fd && "parentSending" in fd) {
       outputRate = (fd as { parentSending: number }).parentSending;
     } else {
-      outputRate =
-        getEffectiveOutputPerMachine(t.node) * (t.node.clockPercent / 100) * t.node.count;
+      outputRate = getEffectiveOutputPerMachine(t.node) * getTotalClockFraction(t.node);
     }
     produced.set(outKey, (produced.get(outKey) ?? 0) + outputRate);
 
@@ -1369,9 +1464,10 @@ function tryStepScaleDownProducer(tree: TreeNode, nodeId: string): TreeNode | nu
   if (n.count > 1) {
     return updateNodeInTree(tree, nodeId, { count: n.count - 1 });
   }
-  if (n.clockPercent > 100) {
+  const maxClock = Math.max(...getMachineClocks(n));
+  if (maxClock > 100) {
     return updateNodeInTree(tree, nodeId, {
-      clockPercent: Math.max(100, n.clockPercent - STORAGE_CLOCK_STEP),
+      clockPercent: Math.max(100, maxClock - STORAGE_CLOCK_STEP),
     });
   }
   return null;
@@ -1396,25 +1492,26 @@ function tryStepScaleUpProducer(
   if (sup >= target - STORAGE_BALANCE_EPS) return null;
 
   // Prefer whole machines at 100% before overclocking; snap when clock crosses +1 equivalent machine.
-  const equivNow = (n.count * n.clockPercent) / 100;
-  if (n.clockPercent > 100.5 && equivNow >= n.count + 1 - 1e-6) {
+  const maxClock = Math.max(...getMachineClocks(n));
+  const equivNow = getTotalClockFraction(n);
+  if (maxClock > 100.5 && equivNow >= n.count + 1 - 1e-6) {
     return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
   }
 
-  if (n.clockPercent <= 100.5) {
+  if (maxClock <= 100.5) {
     const at100 = n.count * b;
     if (target > at100 + STORAGE_BALANCE_EPS) {
       return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
     }
   }
 
-  const nextClock = Math.min(250, n.clockPercent + STORAGE_CLOCK_STEP);
+  const nextClock = Math.min(250, maxClock + STORAGE_CLOCK_STEP);
   const equivIfClock = (n.count * nextClock) / 100;
-  if (nextClock > n.clockPercent && equivIfClock >= n.count + 1 - 1e-6) {
+  if (nextClock > maxClock && equivIfClock >= n.count + 1 - 1e-6) {
     return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
   }
 
-  if (n.clockPercent < 250) {
+  if (maxClock < 250) {
     return updateNodeInTree(tree, nodeId, { clockPercent: nextClock });
   }
 
@@ -1510,25 +1607,26 @@ function tryStepScaleUpProducerMinOutput(
   const b = getEffectiveOutputPerMachine(n);
   if (b <= 0) return null;
 
-  const equivNow = (n.count * n.clockPercent) / 100;
-  if (n.clockPercent > 100.5 && equivNow >= n.count + 1 - 1e-6) {
+  const maxClock = Math.max(...getMachineClocks(n));
+  const equivNow = getTotalClockFraction(n);
+  if (maxClock > 100.5 && equivNow >= n.count + 1 - 1e-6) {
     return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
   }
 
-  if (n.clockPercent <= 100.5) {
+  if (maxClock <= 100.5) {
     const at100 = n.count * b;
     if (minOutputRate > at100 + STORAGE_BALANCE_EPS) {
       return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
     }
   }
 
-  const nextClock = Math.min(250, n.clockPercent + STORAGE_CLOCK_STEP);
+  const nextClock = Math.min(250, maxClock + STORAGE_CLOCK_STEP);
   const equivIfClock = (n.count * nextClock) / 100;
-  if (nextClock > n.clockPercent && equivIfClock >= n.count + 1 - 1e-6) {
+  if (nextClock > maxClock && equivIfClock >= n.count + 1 - 1e-6) {
     return updateNodeInTree(tree, nodeId, { count: n.count + 1, clockPercent: 100 });
   }
 
-  if (n.clockPercent < 250) {
+  if (maxClock < 250) {
     return updateNodeInTree(tree, nodeId, { clockPercent: nextClock });
   }
 
@@ -1595,7 +1693,7 @@ function readConsumerInputFlow(
   const consumer = findNode(tree, consumerId);
   if (!consumer?.node.recipeKey) return { needs: 0, receives: 0 };
   const base = getRecipeInputsPerMinute(consumer.node.recipeKey).find((x) => x.itemKey === itemKey);
-  const needsFallback = (base?.perMinute ?? 0) * consumer.node.count;
+  const needsFallback = (base?.perMinute ?? 0) * getTotalClockFraction(consumer.node);
   const cfd = flowRates.get(consumerId) as FlowRateData | undefined;
   if (cfd?.inputs && cfd.inputs.length > 0) {
     const row = cfd.inputs.find((i) => i.itemKey === itemKey);
@@ -1624,7 +1722,7 @@ function scaleSupplierUntilInputFed(
     if (!consumer?.node.recipeKey) break;
     const base = getRecipeInputsPerMinute(consumer.node.recipeKey).find((x) => x.itemKey === itemKey);
     if (!base) break;
-    const needThroughput = base.perMinute * consumer.node.count;
+    const needThroughput = base.perMinute * getTotalClockFraction(consumer.node);
     t = applyBeltForConsumerInput(t, consumerId, itemKey, needThroughput, preferredBeltKey);
     t = recalcTree(synthesizeMissingInputEdges(t));
 
@@ -1656,7 +1754,7 @@ function autoBalanceAllInputsForNode(
 
   for (const { itemKey, perMinute } of getRecipeInputsPerMinute(consumer.node.recipeKey)) {
     if (perMinute <= 0) continue;
-    const needThroughput = perMinute * consumer.node.count;
+    const needThroughput = perMinute * getTotalClockFraction(consumer.node);
     const suppliers = resolveSupplierIds(t, consumer, itemKey);
     if (suppliers.length === 0) continue;
 
@@ -1725,13 +1823,11 @@ function recalcTree(tree: TreeNode): TreeNode {
     const node = { ...t.node };
 
     if (t.children.length === 0) {
-      node.totalOutput =
-        getEffectiveOutputPerMachine(node) * (node.clockPercent / 100) * node.count;
+      node.totalOutput = getEffectiveOutputPerMachine(node) * getTotalClockFraction(node);
       return { ...t, node, children: [] };
     }
 
-    const supplyPerMachine = getEffectiveOutputPerMachine(node) * (node.clockPercent / 100);
-    node.totalOutput = supplyPerMachine * node.count;
+    node.totalOutput = getEffectiveOutputPerMachine(node) * getTotalClockFraction(node);
 
     return { ...t, node, children: recalcChildren };
   }
@@ -1792,7 +1888,7 @@ function getDeepestDescendantId(root: TreeNode): string {
   return cur.id;
 }
 
-/** One-shot read from localStorage for initial `useState` (avoids setState in mount effects). */
+/** Read saved chart from localStorage (client-only). */
 function readPersistedFlowChartBoot(): {
   charts: SavedChart[];
   tree: TreeNode;
@@ -1827,12 +1923,22 @@ function readPersistedFlowChartBoot(): {
   };
 }
 
+/** Same on server and first client render; localStorage applied after mount to avoid hydration mismatch. */
+const FLOW_CHART_SSR_INITIAL = {
+  tree: EMPTY_TREE,
+  currentChartId: null as string | null,
+  currentChartName: "Untitled",
+  charts: [] as SavedChart[],
+  storageReserves: {} as Record<string, number>,
+  autoBalanceEnabled: false,
+  preferredBeltKey: "belt4",
+};
+
 export function FlowChart() {
-  const [boot] = useState(() => readPersistedFlowChartBoot());
-  const [tree, setTree] = useState(boot.tree);
-  const [currentChartId, setCurrentChartId] = useState(boot.currentChartId);
-  const [currentChartName, setCurrentChartName] = useState(boot.currentChartName);
-  const [charts, setCharts] = useState(boot.charts);
+  const [tree, setTree] = useState(FLOW_CHART_SSR_INITIAL.tree);
+  const [currentChartId, setCurrentChartId] = useState(FLOW_CHART_SSR_INITIAL.currentChartId);
+  const [currentChartName, setCurrentChartName] = useState(FLOW_CHART_SSR_INITIAL.currentChartName);
+  const [charts, setCharts] = useState(FLOW_CHART_SSR_INITIAL.charts);
   const [saveAsOpen, setSaveAsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   /** Set in the menu button click handler (not during render) for portal positioning */
@@ -1844,9 +1950,25 @@ export function FlowChart() {
   const [layout, setLayout] = useState<"vertical" | "horizontal">("horizontal");
   const [separateAction, setSeparateAction] = useState<(() => void) | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
-  const [storageReserves, setStorageReserves] = useState<Record<string, number>>(boot.storageReserves);
-  const [autoBalanceEnabled, setAutoBalanceEnabled] = useState(boot.autoBalanceEnabled);
-  const [preferredBeltKey, setPreferredBeltKey] = useState(boot.preferredBeltKey);
+  const [storageReserves, setStorageReserves] = useState<Record<string, number>>(
+    FLOW_CHART_SSR_INITIAL.storageReserves
+  );
+  const [autoBalanceEnabled, setAutoBalanceEnabled] = useState(FLOW_CHART_SSR_INITIAL.autoBalanceEnabled);
+  const [preferredBeltKey, setPreferredBeltKey] = useState(FLOW_CHART_SSR_INITIAL.preferredBeltKey);
+  const [storagePanelVisible, setStoragePanelVisible] = useState(true);
+
+  useEffect(() => {
+    const boot = readPersistedFlowChartBoot();
+    startTransition(() => {
+      setTree(boot.tree);
+      setCurrentChartId(boot.currentChartId);
+      setCurrentChartName(boot.currentChartName);
+      setCharts(boot.charts);
+      setStorageReserves(boot.storageReserves);
+      setAutoBalanceEnabled(boot.autoBalanceEnabled);
+      setPreferredBeltKey(boot.preferredBeltKey);
+    });
+  }, []);
 
   const loadChartById = useCallback((id: string) => {
     const loaded = loadChart(id);
@@ -2145,6 +2267,12 @@ export function FlowChart() {
     [preferredBeltKey]
   );
 
+  const openQuickBuild = useCallback(() => {
+    setQuickBuildError(null);
+    setQuickBuildKey((k) => k + 1);
+    setQuickBuildOpen(true);
+  }, []);
+
   const closeMenu = useCallback(() => {
     setMenuDropdownAnchor(null);
     setMenuOpen(false);
@@ -2155,7 +2283,18 @@ export function FlowChart() {
       rows={storageRows}
       onReserveDelta={adjustStorageReserve}
       onOptimizeRow={optimizeStorageRow}
+      panelExpanded={storagePanelVisible}
+      onExpandPanel={() => setStoragePanelVisible(true)}
+      onDismiss={() => setStoragePanelVisible(false)}
     />
+  );
+
+  const storageRail = (
+    <div
+      className={`flex h-full shrink-0 justify-end overflow-hidden transition-[width] duration-300 ease-in-out motion-reduce:transition-none motion-reduce:duration-0 ${storagePanelVisible ? "w-64" : "w-10"}`}
+    >
+      {storageStrip}
+    </div>
   );
 
   const header = (
@@ -2297,6 +2436,20 @@ export function FlowChart() {
                     ))}
                   </select>
                 </div>
+                <label className="mb-2 flex cursor-pointer items-start gap-2 rounded-lg border border-zinc-700 p-2 text-xs text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={storagePanelVisible}
+                    onChange={(e) => setStoragePanelVisible(e.target.checked)}
+                    className="mt-0.5 rounded border-zinc-600"
+                  />
+                  <span>
+                    <span className="font-medium text-zinc-200">Storage panel</span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">
+                      Show the surplus / reserve strip on the right. When open, use the narrow Storage bar on the right edge of the strip (arrow points right) to hide it; when hidden, the same bar on the edge (arrow left) shows it again.
+                    </span>
+                  </span>
+                </label>
                 <button
                   type="button"
                   onClick={() => { handleNewChart(); closeMenu(); }}
@@ -2359,7 +2512,7 @@ export function FlowChart() {
           <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
             <main className="min-h-0 min-w-0 flex-1 overflow-auto">
               <div className="flex min-h-0 min-w-0 items-center justify-center p-6">
-                <div className="flex flex-col items-center">
+                <div className="flex flex-row flex-wrap items-center justify-center gap-4">
                   <button
                     type="button"
                     onClick={() => setAddMachineOpen(true)}
@@ -2368,6 +2521,7 @@ export function FlowChart() {
                     <span className="text-3xl font-light text-zinc-400">+</span>
                     <span className="text-center text-sm font-medium text-zinc-400">Add machine</span>
                   </button>
+                  <QuickBuildLineButton onClick={openQuickBuild} />
                   {addMachineOpen && (
                     <AddMachineModal
                       title="Add machine"
@@ -2382,16 +2536,9 @@ export function FlowChart() {
                 </div>
               </div>
             </main>
-            {storageStrip}
+            {storageRail}
           </div>
         </div>
-        <QuickBuildFab
-          onClick={() => {
-            setQuickBuildError(null);
-            setQuickBuildKey((k) => k + 1);
-            setQuickBuildOpen(true);
-          }}
-        />
         <QuickBuildModal
           key={quickBuildKey}
           open={quickBuildOpen}
@@ -2452,6 +2599,7 @@ export function FlowChart() {
               recalcTree(synthesizeMissingInputEdges(reorderSiblingBefore(t, parentId, activeId, insertBeforeId)))
             );
           }}
+          onQuickBuild={isEmpty ? openQuickBuild : undefined}
         />
       ) : (
         <TreeLevel
@@ -2483,16 +2631,9 @@ export function FlowChart() {
             </div>
           </div>
         </main>
-        {storageStrip}
+        {storageRail}
       </div>
     </div>
-    <QuickBuildFab
-      onClick={() => {
-        setQuickBuildError(null);
-        setQuickBuildKey((k) => k + 1);
-        setQuickBuildOpen(true);
-      }}
-    />
     <QuickBuildModal
       key={quickBuildKey}
       open={quickBuildOpen}
@@ -2535,6 +2676,8 @@ interface TreeLevelProps {
   onFlowNodePinToggle?: (treeNodeId: string) => void;
   /** Horizontal slices: reorder siblings under the same parent (vertical only). */
   onReorderSliceSiblings?: (parentId: string, activeId: string, insertBeforeId: string | null) => void;
+  /** Open quick build modal — only passed when the chart has no machines yet. */
+  onQuickBuild?: () => void;
 }
 
 function TreeLevel({
@@ -3262,6 +3405,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
     onFlowNodeHoverLeave,
     onFlowNodePinToggle,
     onReorderSliceSiblings,
+    onQuickBuild,
   } = props;
 
   const [addMachineOpen, setAddMachineOpen] = useState(false);
@@ -3275,7 +3419,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
 
   if (!tree.node.outputItemKey) {
     return (
-      <div className="flex flex-row items-center gap-4 py-12">
+      <div className="flex flex-row flex-wrap items-center justify-center gap-4 py-12">
         <button
           type="button"
           onClick={() => {
@@ -3303,6 +3447,7 @@ function TreeLevelSlices(props: TreeLevelProps) {
           <span className="text-3xl font-light text-zinc-400">+</span>
           <span className="text-center text-sm font-medium text-zinc-400">Add machine or load Iron Plates chain</span>
         </button>
+        {onQuickBuild ? <QuickBuildLineButton onClick={onQuickBuild} /> : null}
         {addMachineOpen && (
           <AddMachineModal
             title="Add machine"
@@ -3356,24 +3501,28 @@ function TreeLevelSlices(props: TreeLevelProps) {
     <div className="flex h-full min-h-full flex-row items-stretch gap-0">
       {slices.map((sliceNodes, sliceIdx) => {
         const prevSlice = sliceIdx > 0 ? slices[sliceIdx - 1]! : null;
-        const hasInputs = sliceIdx > 0 && prevSlice && prevSlice.length > 0;
 
         const inputsByItem = new Map<KeyName, { rate: number; consumers: SliceBeltRow[] }>();
-        if (hasInputs && sliceIdx > 0) {
-          const allPrevSlices = slices.slice(0, sliceIdx);
+        if (sliceNodes.length > 0) {
+          const allPrevSlices = sliceIdx > 0 ? slices.slice(0, sliceIdx) : [];
           const totalRateByItem = new Map<KeyName, number>();
-          for (const slice of allPrevSlices) {
+          const addSliceOutputs = (slice: TreeNode[]) => {
             for (const node of slice) {
               const fd = flowRates.get(node.id) as FlowRateData | undefined;
               const rate =
                 fd && "currentOutput" in fd
                   ? fd.currentOutput
-                  : getEffectiveOutputPerMachine(node.node) * (node.node.clockPercent / 100) * node.node.count;
+                  : getEffectiveOutputPerMachine(node.node) * getTotalClockFraction(node.node);
               const itemKey = node.node.outputItemKey as KeyName;
               if (!itemKey) continue;
               totalRateByItem.set(itemKey, (totalRateByItem.get(itemKey) ?? 0) + rate);
             }
+          };
+          for (const slice of allPrevSlices) {
+            addSliceOutputs(slice);
           }
+          // Same-column producers also supply the pool (computeFlowRates); include them in belt/header rows.
+          addSliceOutputs(sliceNodes);
           for (const [itemKey, rate] of totalRateByItem) {
             const consumers = sliceNodes
               .filter((n) => {
@@ -3915,6 +4064,7 @@ function FlowNodeCard({
   const [producesOpen, setProducesOpen] = useState(false);
   const [producesModalOpen, setProducesModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
+  const [machinesModalOpen, setMachinesModalOpen] = useState(false);
 
   const allocatedInput = (node.inputPerMachine ?? 0) * node.count;
   const hasFullFlowData = flowData && "beltCapacity" in flowData;
@@ -3928,11 +4078,14 @@ function FlowNodeCard({
   const recipeNameAbbrev = node.recipeName ? abbreviateItemDisplayName(node.recipeName, nameDensity) : "";
   const showRecipeSubtitle = Boolean(recipeNameAbbrev && recipeNameAbbrev !== displayProductName);
 
-  const shardsPerMachine = powerShardsForClockPercent(node.clockPercent);
-  const totalPowerShards = shardsPerMachine * node.count;
+  const totalPowerShards = totalPowerShardsForNode(node);
   const SHARD_DOT_CAP = 8;
   const shardDotsToRender = Math.min(totalPowerShards, SHARD_DOT_CAP);
   const shardDotsOverflow = totalPowerShards > SHARD_DOT_CAP ? totalPowerShards - SHARD_DOT_CAP : 0;
+  const shardTitle =
+    totalPowerShards > 0
+      ? `${totalPowerShards} power shard${totalPowerShards !== 1 ? "s" : ""} total (${node.count} machine${node.count !== 1 ? "s" : ""}; per-machine clocks in grid)`
+      : "";
 
   const compactView = (
     <div
@@ -3958,7 +4111,7 @@ function FlowNodeCard({
         {totalPowerShards > 0 && (
           <div
             className="flex max-w-13 shrink-0 flex-wrap justify-end gap-0.5 pt-px"
-            title={`${totalPowerShards} power shard${totalPowerShards !== 1 ? "s" : ""} (${node.count} machine${node.count !== 1 ? "s" : ""} × ${shardsPerMachine} shard${shardsPerMachine !== 1 ? "s" : ""} each @ ${node.clockPercent}%)`}
+            title={shardTitle}
             aria-label={`${totalPowerShards} power shards`}
           >
             {Array.from({ length: shardDotsToRender }, (_, i) => (
@@ -4073,19 +4226,28 @@ function FlowNodeCard({
           </button>
           <button
             type="button"
-            onClick={() => setIsCompact(false)}
+            onClick={(e) => {
+              e.stopPropagation();
+              setMachinesModalOpen(true);
+            }}
             className="rounded p-1 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200"
-            title="Expand"
+            title="Per-machine clock (grid)"
           >
             <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
+              />
             </svg>
           </button>
         </div>
         <DraggablePercent
-          value={node.clockPercent}
+          value={getAverageClockPercent(node)}
           onChange={(v) => onUpdate({ clockPercent: v })}
           className="shrink-0 rounded px-1 py-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          title="Average clock — set all machines the same (clears per-machine tweaks)"
         />
       </div>
     </div>
@@ -4095,6 +4257,15 @@ function FlowNodeCard({
     return (
       <>
         {compactView}
+        {machinesModalOpen && (
+          <MachineClocksModal
+            node={node}
+            onClose={() => setMachinesModalOpen(false)}
+            onUpdate={(u) => {
+              onUpdate(u);
+            }}
+          />
+        )}
         {editModalOpen && (
           <EditNodeModal
             node={node}
@@ -4162,6 +4333,7 @@ function FlowNodeCard({
   }
 
   return (
+    <>
     <div
       data-flow-node-card
       onClick={() => {
@@ -4262,14 +4434,26 @@ function FlowNodeCard({
 
       <div className="mt-3 space-y-2 border-b border-zinc-800 pb-3">
         <div
-          className="flex items-center gap-1"
+          className="flex flex-wrap items-center gap-2"
           onClick={(e) => e.stopPropagation()}
         >
           <DraggablePercent
-            value={node.clockPercent}
+            value={getAverageClockPercent(node)}
             onChange={(v) => onUpdate({ clockPercent: v })}
             className="rounded border border-zinc-600 bg-zinc-800 px-3 py-1 text-center text-xs text-zinc-100"
+            title="Average clock — set all machines the same (clears per-machine tweaks)"
           />
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMachinesModalOpen(true);
+            }}
+            className="rounded border border-zinc-600 bg-zinc-800 px-2 py-1 text-xs text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
+            title="Per-machine clock grid"
+          >
+            Machines…
+          </button>
         </div>
         <div className="text-xs font-medium uppercase tracking-wider text-zinc-500">
           {node.isRaw ? "Output" : "Input"}
@@ -4478,6 +4662,24 @@ function FlowNodeCard({
           )}
           <button
             type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMachinesModalOpen(true);
+            }}
+            className="flex h-6 w-6 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-zinc-500 transition hover:bg-zinc-700 hover:text-zinc-300"
+            title="Per-machine clock (grid)"
+          >
+            <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zM14 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zM14 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z"
+              />
+            </svg>
+          </button>
+          <button
+            type="button"
             onClick={(e) => { e.stopPropagation(); setIsCompact(true); }}
             className="flex h-6 w-6 items-center justify-center rounded border border-zinc-600 bg-zinc-800 text-zinc-500 transition hover:bg-zinc-700 hover:text-zinc-300"
             title="Compact"
@@ -4511,5 +4713,13 @@ function FlowNodeCard({
         />
       )}
     </div>
+    {machinesModalOpen && (
+      <MachineClocksModal
+        node={node}
+        onClose={() => setMachinesModalOpen(false)}
+        onUpdate={onUpdate}
+      />
+    )}
+    </>
   );
 }
