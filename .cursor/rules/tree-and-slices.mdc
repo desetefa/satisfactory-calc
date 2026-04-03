@@ -52,6 +52,11 @@ setTree((t) => recalcTree(synthesizeMissingInputEdges(mutate(t))));
 - `moveNodeDisplaySlice` updates it and pins siblings to same column
 - The root node's `displaySliceIndex` can be changed (non-extractor roots only)
 
+## Mobile Slice Presentation (`<1024px`)
+- Keep horizontal columns, but hide floating INPUT/OUTPUT slice chrome in `TreeLevelSlices.tsx`.
+- Columns use scroll snap (`snap-start`) so horizontal swipe lands cleanly on slice boundaries.
+- Flow pinning stays tap-based on node cards; mobile helper UI may clear pin from `FlowChart.tsx`.
+
 ## Transport Keys on Edges
 - `incomingBeltKey` / `inputEdges[].beltKey` can hold either conveyor (`belt*`) or pipeline (`pipe*`) keys.
 - `updateAllBeltsInTree` applies global belt tier only to solid-item links; fluid links keep/normalize to pipe tiers.

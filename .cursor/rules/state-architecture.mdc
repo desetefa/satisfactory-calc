@@ -17,6 +17,10 @@ activeFactoryId: string          ← which factory tab is open
 ## Quick Build Mode
 - `quickBuildAsFactory: boolean` controls whether Quick Build replaces the active factory tree or creates a new factory tab from the selected recipe.
 
+## Responsive UI State
+- `isMobileViewport` in `FlowChart.tsx` tracks `window.matchMedia("(max-width: 1023px)")` and is passed to `TreeLevelSlices` as `mobileMode`.
+- Mobile mode changes presentation only (row-based slice bands with horizontal machine lanes); tree/flow computations remain unchanged.
+
 ## Delete Confirm State
 - `deleteConfirm` in `FlowChart.tsx` drives a styled confirm modal for destructive actions (delete workspace / delete factory).
 - Destructive menu/tab actions should set `deleteConfirm` first; actual delete handlers run only from modal confirm.

@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AddMachineModal } from "@/components/flow-chart/AddMachineModal";
 import { FlowNodeCard } from "@/components/flow-chart/FlowNodeCard";
 import {
@@ -94,10 +94,10 @@ function TreeLevelSlicesEmpty(props: TreeLevelProps) {
       {emptySlices.map((sliceIdx) => (
         <div
           key={`empty-slice-${sliceIdx}`}
-          className="relative flex min-h-full min-w-[220px] max-w-[220px] flex-col border-x border-dashed border-zinc-600 py-3"
+          className="relative flex min-h-full min-w-[220px] max-w-[220px] snap-start flex-col border-x border-dashed border-zinc-600 py-3"
         >
           {sliceIdx === 0 && (
-            <div className="pointer-events-auto absolute left-0 right-0 top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 px-2 py-2">
+            <div className="pointer-events-auto absolute left-0 right-0 top-0 z-10 hidden border-b border-zinc-800 bg-zinc-950/95 px-2 py-2 lg:block">
               <div className="mb-1 text-center text-[10px] text-zinc-500">INPUT</div>
               <div className="flex flex-col gap-1.5">
                 {factoryImports.length > 0 ? (
@@ -158,6 +158,7 @@ function TreeLevelSlicesEmpty(props: TreeLevelProps) {
 function TreeLevelSlicesBody(props: TreeLevelProps) {
   const {
     tree,
+    mobileMode = false,
     flowRates,
     onUpdateNode,
     onSelectNodeMachine,
@@ -192,9 +193,17 @@ function TreeLevelSlicesBody(props: TreeLevelProps) {
 
   const slices = getDisplaySlices(tree);
   const isEmpty = slices.length === 0;
-  // Always append trailing empty columns so users can see where next stages would go.
-  const trailingSlices = Array.from({ length: TRAILING_SLICE_MARKERS }, () => [] as TreeNode[]);
-  const slicesForDisplay: TreeNode[][] = isEmpty ? slices : [...slices, ...trailingSlices];
+  const slicesForDisplay = useMemo((): TreeNode[][] => {
+    if (isEmpty) return slices;
+    // Always append trailing empty columns so users can see where next stages would go.
+    const trailingSlices = Array.from({ length: TRAILING_SLICE_MARKERS }, () => [] as TreeNode[]);
+    return [...slices, ...trailingSlices];
+  }, [isEmpty, slices]);
+  const mobileSliceSignature = useMemo(
+    () => slicesForDisplay.map((slice) => slice.map((n) => n.id).join(",")).join("|"),
+    [slicesForDisplay]
+  );
+  const mobileLaneRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
   useEffect(() => {
     if (!isSliceDragDebugEnabled()) return;
@@ -225,6 +234,32 @@ function TreeLevelSlicesBody(props: TreeLevelProps) {
       }
     }
   }, [slices, isEmpty, tree]);
+
+  useEffect(() => {
+    if (!mobileMode) return;
+    const raf = requestAnimationFrame(() => {
+      for (const [idxRaw, lane] of Object.entries(mobileLaneRefs.current)) {
+        if (!lane) continue;
+        const sliceIdx = Number(idxRaw);
+        const nodeCount = slicesForDisplay[sliceIdx]?.length ?? 0;
+        const max = lane.scrollWidth - lane.clientWidth;
+        lane.scrollLeft = nodeCount > 1 ? 0 : max > 0 ? max / 2 : 0;
+      }
+    });
+    const raf2 = requestAnimationFrame(() => {
+      for (const [idxRaw, lane] of Object.entries(mobileLaneRefs.current)) {
+        if (!lane) continue;
+        const sliceIdx = Number(idxRaw);
+        const nodeCount = slicesForDisplay[sliceIdx]?.length ?? 0;
+        const max = lane.scrollWidth - lane.clientWidth;
+        lane.scrollLeft = nodeCount > 1 ? 0 : max > 0 ? max / 2 : 0;
+      }
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      cancelAnimationFrame(raf2);
+    };
+  }, [mobileMode, mobileSliceSignature, slicesForDisplay]);
 
   if (isEmpty) return null;
 
@@ -270,6 +305,224 @@ function TreeLevelSlicesBody(props: TreeLevelProps) {
 
     return { options: sortOptionsNonAltFirst(opts), isFiltered };
   };
+
+  if (mobileMode) {
+    return (
+      <div className="flex min-h-0 min-w-0 w-full max-w-full flex-1 flex-col gap-3 py-2">
+        {slicesForDisplay.map((sliceNodes, sliceIdx) => {
+          const showSliceAddButton =
+            sliceNodes.length === 0 &&
+            ((sliceIdx > 0 ? (slices[sliceIdx - 1]?.length ?? 0) : 0) > 0);
+          const canAddInThisSlice = showSliceAddButton || (sliceIdx === 0 && sliceNodes.length === 0);
+          const openMobileAdd = (
+            parentNode: TreeNode,
+            insertIndex: number,
+            targetSliceIdx: number
+          ) => {
+            const allPrev = slices.slice(0, targetSliceIdx);
+            setAddMachineParent(parentNode);
+            setAddMachineInsertIndex(insertIndex);
+            setAddMachineSliceIdx(targetSliceIdx);
+            setAddMachineAllPrevSlices(allPrev);
+            setAddMachineOptionsFiltered(childOptions(parentNode, targetSliceIdx, allPrev).isFiltered);
+            setAddMachineOpen(true);
+          };
+
+          return (
+            <div
+              key={`mobile-slice-${sliceIdx}`}
+              className="w-full max-w-full border-t border-dashed border-zinc-600"
+            >
+              <div
+                ref={(el) => {
+                  mobileLaneRefs.current[sliceIdx] = el;
+                }}
+                className="slice-lane-scroll w-full max-w-full overflow-x-scroll overflow-y-hidden px-2 py-3 pb-4"
+                style={{ WebkitOverflowScrolling: "touch" }}
+              >
+                <div className={`mx-auto flex w-max min-w-full ${sliceNodes.length > 1 ? "justify-start" : "justify-center"} gap-3`}>
+                {sliceNodes.map((node, i) => {
+                  const allPrevSlices = slices.slice(0, sliceIdx);
+                  const { options: opts } = childOptions(node, sliceIdx, allPrevSlices);
+                  const parent = node.parentId ? findNode(tree, node.parentId) : null;
+                  const parentTree = parent ?? tree;
+                  const isRootRow = node.id === tree.id;
+                  const childIdx =
+                    parentTree && !isRootRow
+                      ? parentTree.children.findIndex((c) => c.id === node.id)
+                      : -1;
+                  const allProduces = node.node.isRaw
+                    ? getExtractorMachineOptionsFull()
+                    : allPrevSlices.length > 0
+                      ? (() => {
+                          const seen = new Set<string>();
+                          return allPrevSlices.flatMap((s) =>
+                            s.flatMap((n) =>
+                              getMachineOptionsForInput(n.node.outputItemKey).filter((o) => {
+                                if (seen.has(o.recipeKey)) return false;
+                                seen.add(o.recipeKey);
+                                return true;
+                              })
+                            )
+                          );
+                        })()
+                      : parent
+                        ? getMachineOptionsForInput(parent.node.outputItemKey)
+                        : [];
+                  const producesOpts = allProduces.filter((o) => o.buildingKey === node.node.buildingKey);
+                  const power = getNodePowerDisplay(node.node, flowRates.get(node.id));
+
+                  return (
+                    <div key={`mobile-node-${node.id}`} className="shrink-0">
+                      <div className="flex items-center gap-2">
+                        {i === 0 && (
+                          <button
+                            type="button"
+                            title="Add machine before"
+                            onClick={() =>
+                              openMobileAdd(
+                                parentTree,
+                                isRootRow ? 0 : Math.max(0, childIdx),
+                                sliceIdx
+                              )
+                            }
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-2 border-dashed border-zinc-600 text-zinc-400 transition hover:border-amber-500/40 hover:text-amber-400"
+                          >
+                            +
+                          </button>
+                        )}
+                        <div className="flex flex-col items-center">
+                          <FlowNodeCard
+                            node={node.node}
+                            machineOptions={opts}
+                            producesOptions={producesOpts}
+                            isOpen={false}
+                            onToggleOpen={() => {}}
+                            onUpdate={(u) => onUpdateNode(node.id, u)}
+                            onSelectMachine={(opt) => onSelectNodeMachine(node.id, opt)}
+                            onRemove={parent ? () => removeNode(parent.id, node.id) : undefined}
+                            onBreakOut={
+                              parent && onBreakOutMachine
+                                ? (machineIndex) => onBreakOutMachine(parent.id, node.id, machineIndex)
+                                : undefined
+                            }
+                            totalDemand={node.children.reduce((s, c) => s + getChildDemandForParentOutput(c, node.node.outputItemKey), 0)}
+                            childCount={node.children.length}
+                            flowData={flowRates.get(node.id)}
+                            incomingBeltKey={node.incomingBeltKey}
+                            fixedWidth
+                            flowHighlightSelf={flowFocusNodeId === node.id}
+                            flowHighlightRelated={flowFocusRelatedIds.has(node.id)}
+                            onFlowPinClick={
+                              onFlowNodePinToggle ? () => onFlowNodePinToggle(node.id) : undefined
+                            }
+                          />
+                          {power && (
+                            <div className="mt-1 flex w-[200px] justify-center rounded-lg border border-zinc-700 bg-zinc-800/90 px-2 py-1">
+                              <div
+                                className={`inline-flex items-center gap-1 text-xs font-semibold ${
+                                  power.isGenerating ? "text-emerald-300" : "text-red-300"
+                                }`}
+                                title={`${power.isGenerating ? "Generating" : "Consuming"} ${formatRate(power.mw)} MW`}
+                              >
+                                <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 3L4 14h7l-1 7 9-11h-7l1-7z" />
+                                </svg>
+                                <span>{power.isGenerating ? "+" : "-"}{formatRate(power.mw)} MW</span>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          title={
+                            i < sliceNodes.length - 1
+                              ? "Add machine between"
+                              : "Add machine after"
+                          }
+                          onClick={() =>
+                            openMobileAdd(
+                              parentTree,
+                              isRootRow
+                                ? tree.children.length
+                                : childIdx >= 0
+                                  ? childIdx + 1
+                                  : parentTree.children.length,
+                              sliceIdx
+                            )
+                          }
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border-2 border-dashed border-zinc-600 text-zinc-400 transition hover:border-amber-500/40 hover:text-amber-400"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                </div>
+              </div>
+              {canAddInThisSlice && (
+                <div className="flex justify-center px-2 pb-3">
+                  <button
+                    type="button"
+                    title="Add machine in this slice"
+                    onClick={() => {
+                      openMobileAdd(tree, tree.children.length, sliceIdx);
+                    }}
+                    className="flex h-10 w-10 shrink-0 snap-start items-center justify-center rounded-lg border-2 border-dashed border-zinc-600 text-zinc-400 transition hover:border-amber-500/40 hover:text-amber-400"
+                  >
+                    +
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        {addMachineOpen && addMachineParent && (
+          <AddMachineModal
+            title="Add machine"
+            options={childOptions(addMachineParent, addMachineSliceIdx, addMachineAllPrevSlices ?? []).options}
+            allOptions={addMachineOptionsFiltered ? getAllMachineOptions() : undefined}
+            onSelect={(opt) => {
+              const parent = addMachineParent!;
+              const insertIndex = addMachineInsertIndex ?? parent.children.length;
+              const inputEdges: InputEdge[] = [];
+              const allPrev = addMachineAllPrevSlices ?? [];
+              const parentProduces = parent?.node.outputItemKey;
+              if (opt.recipeKey && allPrev.length > 0 && parent) {
+                const inputs = getRecipeInputsPerMinute(opt.recipeKey);
+                for (const inp of inputs) {
+                  if (parentProduces === inp.itemKey) continue;
+                  let producer: TreeNode | undefined;
+                  for (let s = allPrev.length - 1; s >= 0; s--) {
+                    producer = allPrev[s]!.find((n) => n.node.outputItemKey === inp.itemKey);
+                    if (producer) break;
+                  }
+                  if (producer) {
+                    inputEdges.push({
+                      itemKey: inp.itemKey,
+                      producerId: producer.id,
+                      beltKey: pickDefaultBelt(inp.perMinute, inp.itemKey),
+                    });
+                  }
+                }
+              }
+              onAddMachine(
+                parent,
+                opt,
+                insertIndex,
+                inputEdges.length > 0 ? inputEdges : undefined,
+                addMachineSliceIdx
+              );
+              setAddMachineOpen(false);
+            }}
+            onClose={() => setAddMachineOpen(false)}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -409,16 +662,16 @@ function TreeLevelSlicesBody(props: TreeLevelProps) {
 
         const hasFloatingOutput = outputsByItem.size > 0;
         /** h-6 + h-22 + py-3 body gutter — matches old in-flow layout; floats do not participate in flex */
-        const sliceFloatPadY = "pt-[7.75rem]";
+        const sliceFloatPadY = "lg:pt-[7.75rem]";
         // Always reserve the same bottom space as the top so justify-center lands at the same visual
         // midpoint across all columns, regardless of whether a column has a floating OUTPUT bar.
-        const sliceFloatPadBottom = "pb-[7.75rem]";
+        const sliceFloatPadBottom = "lg:pb-[7.75rem]";
 
         return (
           <Fragment key={sliceIdx}>
             <SliceColumnSurface
               sliceIdx={sliceIdx}
-              className="relative flex min-h-full min-w-[220px] max-w-[220px] flex-col overflow-visible border-x border-dashed border-zinc-600"
+              className="relative flex min-h-full min-w-[220px] max-w-[220px] snap-start flex-col overflow-visible border-x border-dashed border-zinc-600"
             >
               {/* Machines + trailing "+": stacked; translate shifts block down by half the "+" row so only the card center aligns with column center */}
               <div
@@ -806,7 +1059,7 @@ function TreeLevelSlicesBody(props: TreeLevelProps) {
 
               {/* Floating INPUT — overlay; column flex is only the machine stack above */}
               <div
-                className={`pointer-events-auto absolute left-0 right-0 top-0 z-30 flex flex-col overflow-visible border-b shadow-[0_4px_12px_rgba(0,0,0,0.35)] backdrop-blur-sm transition ${
+                className={`pointer-events-auto absolute left-0 right-0 top-0 z-30 hidden flex-col overflow-visible border-b shadow-[0_4px_12px_rgba(0,0,0,0.35)] backdrop-blur-sm transition lg:flex ${
                   hasAnyRed ? "border-red-500/60 bg-red-950/90" : "border-zinc-800 bg-zinc-950/95"
                 }`}
               >
@@ -921,7 +1174,7 @@ function TreeLevelSlicesBody(props: TreeLevelProps) {
               </div>
 
               {hasFloatingOutput && (
-                <div className="pointer-events-auto absolute bottom-0 left-0 right-0 z-30 flex flex-col overflow-visible border-t border-zinc-800 bg-zinc-950/95 shadow-[0_-4px_12px_rgba(0,0,0,0.35)] backdrop-blur-sm">
+                <div className="pointer-events-auto absolute bottom-0 left-0 right-0 z-30 hidden flex-col overflow-visible border-t border-zinc-800 bg-zinc-950/95 shadow-[0_-4px_12px_rgba(0,0,0,0.35)] backdrop-blur-sm lg:flex">
                   <div className="flex h-6 shrink-0 w-full items-center justify-center gap-1 text-xs text-zinc-500">
                     {outputsByItem.size > 2 ? (
                       <button

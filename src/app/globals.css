@@ -46,3 +46,17 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #71717a;
 }
+
+/* Mobile slice lanes: force visible horizontal scrollbar area per slice row. */
+.slice-lane-scroll {
+  scrollbar-gutter: stable;
+}
+
+.slice-lane-scroll::-webkit-scrollbar {
+  height: 0;
+}
+
+.slice-lane-scroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

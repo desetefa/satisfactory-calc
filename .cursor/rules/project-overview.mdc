@@ -27,3 +27,4 @@ alwaysApply: true
 ## Flow Layout
 - **Horizontal only** (`TreeLevelSlices.tsx`) — columns by `displaySliceIndex`
 - Vertical `TreeLevel.tsx` is retained as legacy component code but not used by `FlowChart.tsx` runtime.
+- **Responsive mobile mode** (`<1024px`) keeps horizontal slice columns but shifts controls into the hamburger menu, hides storage rail from main canvas, and removes slice input/output chrome for touch-first navigation.

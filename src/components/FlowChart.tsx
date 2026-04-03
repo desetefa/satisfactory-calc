@@ -206,6 +206,7 @@ export function FlowChart() {
   >(null);
   const [separateAction, setSeparateAction] = useState<(() => void) | null>(null);
   const [storagePanelVisible, setStoragePanelVisible] = useState(true);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
 
   // ── Derived: active factory ───────────────────────────────────────────────────
@@ -213,6 +214,10 @@ export function FlowChart() {
     workspace.factories.find((f) => f.id === activeFactoryId) ??
     workspace.factories[0] ??
     INITIAL_WORKSPACE.factories[0]!;
+  const activeFactoryIndex = Math.max(
+    0,
+    workspace.factories.findIndex((f) => f.id === activeFactory.id)
+  );
 
   const { storageReserves, autoBalanceEnabled, preferredBeltKey } = resolveFactorySettings(activeFactory);
   const tree = activeFactory.tree;
@@ -282,6 +287,15 @@ export function FlowChart() {
       if (firstId) setActiveFactoryId(firstId);
     });
   }, [resetWorkspace]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(max-width: 1023px)");
+    const apply = () => setIsMobileViewport(media.matches);
+    apply();
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, []);
 
   // Prime quick-build templates after initial mount to reduce first-open latency.
   useEffect(() => {
@@ -866,11 +880,14 @@ export function FlowChart() {
               {workspace.name}
               {!isSaved && <span className="ml-1 text-xs font-normal text-zinc-500">(unsaved)</span>}
             </h1>
+            <span className="truncate text-xs text-zinc-400 lg:hidden">
+              {activeFactory.name}
+            </span>
             {workspaceBuildInventory && workspaceBuildInventory.rows.length > 0 && (
               <button
                 type="button"
                 onClick={() => setBuildInventoryOpen(true)}
-                className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100"
+                className="hidden shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-xs text-zinc-300 transition hover:border-zinc-600 hover:text-zinc-100 lg:inline-block"
                 title="Open build inventory"
               >
                 Inventory
@@ -878,7 +895,7 @@ export function FlowChart() {
             )}
             {!isEmpty && (
               <span
-                className={`inline-flex shrink-0 items-center gap-1 text-sm font-semibold ${
+                className={`hidden shrink-0 items-center gap-1 text-sm font-semibold lg:inline-flex ${
                   powerStats.netMw >= 0 ? "text-emerald-300" : "text-red-300"
                 }`}
                 title={`Generation ${formatRate(powerStats.generationMw)} MW · Consumption ${formatRate(powerStats.consumptionMw)} MW`}
@@ -899,7 +916,7 @@ export function FlowChart() {
             disabled={!canUndo}
             title="Undo (Ctrl+Z)"
             aria-label="Undo"
-            className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+            className="hidden rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 lg:inline-flex"
           >
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a4 4 0 0 1 0 8H9M3 10l4-4M3 10l4 4" />
@@ -911,7 +928,7 @@ export function FlowChart() {
             disabled={!canRedo}
             title="Redo (Ctrl+Y)"
             aria-label="Redo"
-            className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30"
+            className="hidden rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 lg:inline-flex"
           >
             <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10H11a4 4 0 0 0 0 8h4M21 10l-4-4M21 10l-4 4" />
@@ -921,7 +938,7 @@ export function FlowChart() {
             <button
               type="button"
               onClick={() => { separateAction(); setSeparateAction(null); }}
-              className="rounded-lg p-2 text-amber-400 hover:bg-zinc-800 hover:text-amber-300"
+              className="hidden rounded-lg p-2 text-amber-400 hover:bg-zinc-800 hover:text-amber-300 lg:inline-flex"
               title="Separate"
               aria-label="Separate"
             >
@@ -978,6 +995,73 @@ export function FlowChart() {
                       <option key={w.id} value={w.id}>{w.name}</option>
                     ))}
                   </select>
+                  <div className="mb-2 rounded-lg border border-zinc-700 p-2 lg:hidden">
+                    <div className="mb-1 text-[10px] font-medium uppercase tracking-wide text-zinc-500">Factory</div>
+                    <div className="flex max-h-36 flex-col gap-1 overflow-y-auto">
+                      {workspace.factories.map((factory) => (
+                        <button
+                          key={factory.id}
+                          type="button"
+                          onClick={() => {
+                            setActiveFactoryId(factory.id);
+                            closeMenu();
+                          }}
+                          className={`w-full rounded px-2 py-1 text-left text-xs transition ${
+                            factory.id === activeFactoryId
+                              ? "bg-amber-500/20 text-amber-300"
+                              : "text-zinc-300 hover:bg-zinc-800"
+                          }`}
+                        >
+                          {factory.name}
+                        </button>
+                      ))}
+                    </div>
+                    {!isEmpty && (
+                      <div
+                        className={`mt-2 inline-flex items-center gap-1 text-xs font-semibold ${
+                          powerStats.netMw >= 0 ? "text-emerald-300" : "text-red-300"
+                        }`}
+                        title={`Generation ${formatRate(powerStats.generationMw)} MW · Consumption ${formatRate(powerStats.consumptionMw)} MW`}
+                      >
+                        <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 3L4 14h7l-1 7 9-11h-7l1-7z" />
+                        </svg>
+                        <span>{powerStats.netMw >= 0 ? "+" : ""}{formatRate(powerStats.netMw)} MW</span>
+                      </div>
+                    )}
+                    {workspaceBuildInventory && workspaceBuildInventory.rows.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBuildInventoryOpen(true);
+                          closeMenu();
+                        }}
+                        className="mt-2 w-full rounded-lg border border-zinc-700 bg-zinc-800 px-2 py-1.5 text-left text-xs text-zinc-200 transition hover:border-zinc-600 hover:text-zinc-100"
+                      >
+                        Open inventory
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleAddFactory();
+                        closeMenu();
+                      }}
+                      className="mt-2 w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-300 transition hover:bg-zinc-800"
+                    >
+                      Add factory
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        openQuickBuildFactory();
+                        closeMenu();
+                      }}
+                      className="mt-1 w-full rounded-lg px-2 py-1.5 text-left text-xs text-zinc-300 transition hover:bg-zinc-800"
+                    >
+                      Quick build factory
+                    </button>
+                  </div>
                   <div className="mb-2 rounded-lg border border-zinc-700 p-2">
                     <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-300">
                       <input
@@ -1064,7 +1148,7 @@ export function FlowChart() {
       </div>
 
       {/* Row 2: factory tabs + belt controls */}
-      <div className="flex items-center px-3 pb-2 pt-1 gap-0">
+      <div className="hidden items-center gap-0 px-3 pb-2 pt-1 lg:flex">
         {/* Scrollable tabs area */}
         <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
         {workspace.factories.map((factory) => (
@@ -1313,13 +1397,62 @@ export function FlowChart() {
         <main
           className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"
         >
+          <div className="flex items-center justify-between gap-2 border-b border-zinc-800/70 px-3 py-2 lg:hidden">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveFactoryId(
+                    workspace.factories[Math.max(0, activeFactoryIndex - 1)]?.id ?? activeFactory.id
+                  )
+                }
+                disabled={activeFactoryIndex <= 0}
+                className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-300 transition hover:border-zinc-600 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setActiveFactoryId(
+                    workspace.factories[
+                      Math.min(workspace.factories.length - 1, activeFactoryIndex + 1)
+                    ]?.id ?? activeFactory.id
+                  )
+                }
+                disabled={activeFactoryIndex >= workspace.factories.length - 1}
+                className="rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs text-zinc-300 transition hover:border-zinc-600 disabled:cursor-not-allowed disabled:opacity-35"
+              >
+                Next
+              </button>
+            </div>
+            <div className="min-w-0 text-center">
+              <div className="truncate text-xs font-medium text-zinc-200">{activeFactory.name}</div>
+              <div className="text-[10px] text-zinc-500">
+                Tap a node to pin flow
+                {effectiveFlowPin && (
+                  <button
+                    type="button"
+                    onClick={() => setFlowPinnedNodeId(null)}
+                    className="ml-2 text-amber-300 hover:text-amber-200"
+                  >
+                    Clear pin
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="text-[10px] text-zinc-500">
+              {activeFactoryIndex + 1}/{workspace.factories.length}
+            </div>
+          </div>
           <div
-            className="flex min-w-0 min-h-full w-fit items-stretch justify-start p-6"
+            className="flex min-h-full min-w-0 w-full max-w-full items-stretch justify-start p-2 lg:w-fit lg:max-w-none lg:p-6"
           >
-            <div className="flex min-h-full flex-1 flex-row items-stretch justify-start">
+            <div className="flex min-h-full min-w-0 flex-1 flex-row items-stretch justify-start">
         <TreeLevelSlices
           treeNode={tree}
           tree={tree}
+          mobileMode={isMobileViewport}
           flowRates={flowRates}
           machineOptions={
             tree.node.outputItemKey
@@ -1380,7 +1513,7 @@ export function FlowChart() {
             </div>
           </div>
         </main>
-        {storageRail}
+        <div className="hidden lg:flex">{storageRail}</div>
       </div>
     </div>
     <QuickBuildModal

@@ -64,4 +64,6 @@ export interface TreeLevelProps {
   factoryImports?: FactoryImportRow[];
   /** Clear the entire factory tree (resets to empty). Called when the root non-extractor is deleted. */
   onClearTree?: () => void;
+  /** Mobile viewport mode (<1024px): render row-based slice bands. */
+  mobileMode?: boolean;
 }
