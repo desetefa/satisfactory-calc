@@ -1,0 +1,52 @@
+---
+description: How flow rates are computed and how storage balance/reserves work
+globs: src/lib/flowChartFlowRates.ts,src/lib/flowChartStorageBalance.ts
+alwaysApply: false
+---
+
+# Flow Rates & Storage Balance
+
+## `computeFlowRates` — `src/lib/flowChartFlowRates.ts`
+Entry point: `computeFlowRates(tree, externalSupply?)` → `Map<nodeId, FlowRateData>`
+
+1. Iterates **flow slices** (`getFlowSlices`) — root is slice 0
+2. Topologically sorts nodes per slice (`sortSliceNodesForFlow`) so producers run before consumers
+3. Maintains item **pools** (`Map<KeyName, number>`) seeded by `externalSupply` (factory imports)
+4. Byproduct-aware behavior:
+   - For recipes with extra products, machine utilization is capped by byproduct sink headroom: `max(0, remainingDemand(item) - pool(item))`
+   - This throttles multi-output producers so aggregate byproduct generation cannot exceed downstream consumption capacity
+   - Active machines add both primary output and byproduct outputs into pools using recipe per-minute ratios
+5. Each node: draws inputs from pool (capped by belt rate) → computes utilization → pushes output(s) to pool
+6. Transport capacity is item-type aware:
+   - Solids use conveyor belt tiers (`belt*`)
+   - Fluids/gases use pipeline tiers (`pipe*`)
+   - The same `incomingBeltKey` / `inputEdges[].beltKey` field stores either key type based on item
+
+`computeFlowBalanceMaps(tree, flowRates)` → `{ produced, consumed }` maps for storage/excess UI.
+For recipe machines, produced rates are calculated from recipe products × clock × utilization (includes byproducts), not only `outputItemKey`.
+
+## `FlowRateData` — `src/lib/flowChartFlowTypes.ts`
+Per-node: `needs`, `receives` (inputs), `utilization`, `currentOutput`, `outputs[]`, `beltCapacity`, `isBeltLimited`.
+`outputs[]` includes primary + byproducts with per-item `maxOutput/currentOutput` so UI can render multi-output nodes and byproduct totals.
+
+## `importSupply` — `src/lib/chartStorage.ts`
+`getImportSupply(factory)` sums `ratePerMin` per item key across all `factory.imports`.  
+Passed to `computeFlowRates` as `externalSupply`.
+
+## Storage Balance — `src/lib/flowChartStorageBalance.ts`
+Auto-balance scales machine counts/clocks toward reserves:
+- `autoBalanceAfterEdit(tree, reserves, preferredBeltKey)` — full rebalance
+- `autoBalanceAncestorChain(tree, nodeId, ...)` — rebalance only the ancestor chain
+- `satisfyStorageReserveForItem` / `optimizeStorageItemNoWaste` — targeted helpers
+
+`autoBalanceEnabled` flag on `FactoryRecord` gates whether balance runs after each edit.
+
+## Excess Production (used in `FactoryEditModal`)
+```ts
+const { produced, consumed } = computeFlowBalanceMaps(tree, computeFlowRates(tree));
+const excess = new Map();
+for (const [key, rate] of produced) {
+  const net = rate - (consumed.get(key) ?? 0);
+  if (net > 0.001) excess.set(key, net);
+}
+```

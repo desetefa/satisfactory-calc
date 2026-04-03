@@ -18,6 +18,11 @@ import {
   getAllMiners,
   getAllRecipes,
 } from "./db";
+import {
+  getPowerGeneratorInputsPerMinute,
+  getPowerGeneratorOptionsForInput,
+  POWER_ITEM_KEY,
+} from "./powerGenerators";
 
 const RAW_ITEM_KEYS = new Set(
   getAllResources().map((r) => r.key_name)
@@ -270,6 +275,7 @@ export type MachineOptionFromRecipe = {
  * All ways to produce a given item (normal recipes + extractors). Non-alternate recipes sort first.
  */
 export function getMachineOptionsForProduct(productKey: KeyName): MachineOptionFromRecipe[] {
+  if (productKey === POWER_ITEM_KEY) return [];
   const byRecipeKey = new Map<string, MachineOptionFromRecipe>();
 
   for (const recipe of getRecipesForProduct(productKey)) {
@@ -370,6 +376,17 @@ export function getMachineOptionsForInput(
       inputPerMachine: inputQty,
     });
   }
+  for (const powerOpt of getPowerGeneratorOptionsForInput(inputItemKey)) {
+    result.push({
+      recipeKey: powerOpt.recipeKey,
+      recipeName: powerOpt.recipeName,
+      buildingKey: powerOpt.buildingKey,
+      buildingName: powerOpt.buildingName,
+      outputItemKey: powerOpt.outputItemKey,
+      outputPerMachine: powerOpt.outputPerMachine,
+      inputPerMachine: powerOpt.inputPerMachine,
+    });
+  }
   result.sort((a, b) => {
     const aAlt = a.recipeName.startsWith("Alternate");
     const bAlt = b.recipeName.startsWith("Alternate");
@@ -436,8 +453,33 @@ export function getExtractorMachineOptionsFull(): {
   return result;
 }
 
+let cachedAllMachineOptions: ReturnType<typeof getExtractorMachineOptionsFull> | null = null;
+
+/**
+ * Every machine option — both raw extractors and recipe-based producers.
+ * Used for the first machine in a factory where any machine type is valid
+ * (e.g. a processing factory that receives imports instead of extracting raw resources).
+ */
+export function getAllMachineOptions(): ReturnType<typeof getExtractorMachineOptionsFull> {
+  if (cachedAllMachineOptions) return cachedAllMachineOptions;
+  const seen = new Set<string>();
+  const result = [...getExtractorMachineOptionsFull()];
+  for (const key of getAllProductKeysWithRecipes()) {
+    for (const opt of getMachineOptionsForProduct(key)) {
+      if (!seen.has(opt.recipeKey)) {
+        seen.add(opt.recipeKey);
+        result.push(opt);
+      }
+    }
+  }
+  cachedAllMachineOptions = result;
+  return result;
+}
+
 /** All recipe inputs per minute (for multi-input machines) */
 export function getRecipeInputsPerMinute(recipeKey: string): { itemKey: KeyName; perMinute: number }[] {
+  const powerInputs = getPowerGeneratorInputsPerMinute(recipeKey);
+  if (powerInputs) return powerInputs;
   const recipe = getRecipe(recipeKey);
   if (!recipe) return [];
   const { ingredients } = recipePerMinute(recipe);

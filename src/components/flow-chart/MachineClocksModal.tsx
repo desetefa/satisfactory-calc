@@ -1,5 +1,6 @@
 "use client";
 
+import { createPortal } from "react-dom";
 import type { FlowNode } from "@/lib/flowChartModel";
 import {
   getAverageClockPercent,
@@ -49,12 +50,14 @@ function CompactMachinePreview({
   machineCount,
   clockPercent,
   onClockChange,
+  onBreakOut,
 }: {
   node: FlowNode;
   machineIndex: number;
   machineCount: number;
   clockPercent: number;
   onClockChange: (v: number) => void;
+  onBreakOut?: () => void;
 }) {
   const productCompact = getItemDisplayName(node.outputItemKey, "compact");
   const recipeAbbrev =
@@ -111,7 +114,22 @@ function CompactMachinePreview({
         </div>
       )}
 
-      <div className="mt-0.5 flex items-center justify-end border-t border-zinc-800/80 pt-1.5">
+      <div className="mt-0.5 flex items-center justify-between border-t border-zinc-800/80 pt-1.5">
+        {onBreakOut && machineCount > 1 ? (
+          <button
+            type="button"
+            onClick={onBreakOut}
+            title="Break out this machine into its own node"
+            className="flex items-center gap-1 rounded px-1 py-0.5 text-xs text-zinc-600 transition hover:bg-zinc-800 hover:text-amber-400"
+          >
+            <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7v10M8 7l-3 3m3-3 3 3M16 7v4m0 0h4m-4 0-3 3" />
+            </svg>
+            break out
+          </button>
+        ) : (
+          <span />
+        )}
         <DraggablePercent
           value={clockPercent}
           onChange={onClockChange}
@@ -127,19 +145,24 @@ export function MachineClocksModal({
   node,
   onClose,
   onUpdate,
+  onBreakOut,
 }: {
   node: FlowNode;
   onClose: () => void;
   onUpdate: (u: Partial<FlowNode>) => void;
+  /** Called with the machine index to break it out into its own sibling node. */
+  onBreakOut?: (machineIndex: number) => void;
 }) {
   const clocks = getMachineClocks(node);
   const shards = totalPowerShardsForNode(node);
   const product = getItemDisplayName(node.outputItemKey, "comfortable");
   const displayOut = getEffectiveOutputPerMachine(node) * clocks.reduce((s, c) => s + c / 100, 0);
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
       role="presentation"
     >
@@ -157,12 +180,15 @@ export function MachineClocksModal({
             <p className="mt-1 text-sm text-zinc-500">
               {node.count} × {node.buildingName} · {product}
             </p>
-            <p className="mt-1 text-xs text-zinc-600">
-              ~{formatRate(displayOut)}/min combined
+            <p className="mt-2 flex items-baseline gap-2">
+              <span className="text-2xl font-bold tabular-nums text-teal-300">
+                {formatRate(displayOut)}
+                <span className="ml-0.5 text-base font-semibold text-teal-400">/min</span>
+              </span>
+              <span className="text-sm font-medium text-zinc-400">combined</span>
               {shards > 0 && (
-                <span className="text-purple-300">
-                  {" "}
-                  · {shards} power shard{shards !== 1 ? "s" : ""}
+                <span className="text-sm font-medium text-purple-300">
+                  · {shards} shard{shards !== 1 ? "s" : ""}
                 </span>
               )}
             </p>
@@ -203,11 +229,20 @@ export function MachineClocksModal({
                   next[i] = v;
                   onUpdate({ machineClockPercents: next });
                 }}
+                onBreakOut={
+                  onBreakOut
+                    ? () => {
+                        onBreakOut(i);
+                        onClose();
+                      }
+                    : undefined
+                }
               />
             ))}
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

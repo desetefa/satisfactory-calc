@@ -1,0 +1,57 @@
+---
+description: Core data types, their shapes, and where they are defined
+globs: src/**/*.ts,src/**/*.tsx
+alwaysApply: false
+---
+
+# Core Data Types
+
+## Hierarchy
+`WorkspaceDoc` → `FactoryRecord[]` → `tree: TreeNode` → `children: TreeNode[]`
+
+## `FlowNode` — `src/lib/flowChartModel.ts`
+The machine data at a node. Key fields:
+- `outputItemKey`, `outputItemName`, `buildingKey`, `buildingName`
+- `recipeKey`, `recipeName` (optional — absent on extractors)
+- `outputPerMachine`, `inputPerMachine` (0 on extractors → `isRaw = true`)
+- `count`, `clockPercent`, `machineClockPercents?`, `totalOutput`
+- `isRaw: boolean`, `nodePurity?`
+
+## `TreeNode` — `src/lib/flowChartModel.ts`
+Wraps a FlowNode in a tree. Key fields:
+- `id` (mirrors `node.id`), `node: FlowNode`, `children: TreeNode[]`, `parentId`
+- `incomingBeltKey?`, `inputEdges?: InputEdge[]`
+- `displaySliceIndex?` — which visual column the node appears in (horizontal layout)
+- `displayColumnPosition?` — sort order within a column
+
+## `InputEdge` — `src/lib/flowChartModel.ts`
+Links a node to a non-parent supplier: `{ itemKey, producerId, beltKey }`.
+
+## `WorkspaceDoc` / `FactoryRecord` — `src/lib/chartStorage.ts`
+- `WorkspaceDoc`: `id`, `name`, `factories: FactoryRecord[]`, `updatedAt`
+- `FactoryRecord`: `id`, `name`, `tree`, `exports`, `imports`, `storageReserves?`, `autoBalanceEnabled?`, `preferredBeltKey?`
+- `FactoryExport` / `FactoryImport`: shared `id`, `itemKey`, `ratePerMin`; cross-link by factory id
+
+## `MachineOption` — `src/components/flow-chart/flowChartTypes.ts`
+Recipe-derived tuple for the Add Machine modal:
+`{ recipeKey, recipeName, buildingKey, buildingName, outputItemKey, outputPerMachine, inputPerMachine }`
+
+## Key Constants
+| Symbol | File | Value |
+|--------|------|-------|
+| `EMPTY_TREE` | `FlowChart.tsx` | `createTreeNode(createNode("",…), null)` — placeholder root |
+| `FLOW_CHART_BELTS` | `flowChartConstants.ts` | All belts sorted by rate |
+| `DEFAULT_PREFERRED_BELT` | `chartStorage.ts` | `"belt4"` (Mk.4) |
+
+## Power Generator Extension Types
+- `PowerGeneratorOption` — `src/lib/powerGenerators.ts`  
+  Pseudo machine-option shape for generator support without replacing base dataset:
+  `{ recipeKey, recipeName, buildingKey, buildingName, outputItemKey: "power", outputPerMachine, inputPerMachine, inputsPerMinute[] }`
+
+- `NodePowerDisplay` — `src/lib/flowChartPower.ts`  
+  Derived UI power metric per node: `{ isGenerating: boolean, mw: number }`
+
+## Build Inventory Types
+- `BuildInventoryResult` — `src/lib/flowChartBuildInventory.ts`  
+  Build-sheet rows keyed by machine + produced item for both factory and workspace scopes:
+  `{ rows: { buildingKey, buildingName, itemKey, itemName, count, shardsPerMachine, buildIngredients? }[], powerShards }`

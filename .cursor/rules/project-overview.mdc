@@ -1,0 +1,29 @@
+---
+description: Project purpose, tech stack, and top-level directory map
+alwaysApply: true
+---
+
+# Satisfactory Calc — Project Overview
+
+**Purpose**: Satisfactory game production-planning UI. Users build a tree of machines with flow rates, belts, clocks, and purity, across multiple named factories in a workspace.
+
+## Tech Stack
+- **Next.js 16** (App Router, `src/app/`)
+- **React 19**, **Tailwind CSS 4**, **TypeScript 5**
+- **Vitest 3** — `npm test`
+- Game data: static JSON at `src/data/satisfactory.json`, accessed via `src/lib/db.ts`
+- State: React `useState` + `useRef` only — no Redux / Zustand / React Query
+
+## Directory Map
+| Path | Role |
+|------|------|
+| `src/app/` | Next.js routes + API routes (`/api/data`, `/api/recipes`, etc.) |
+| `src/components/FlowChart.tsx` | Main component — all workspace/factory/tree state lives here |
+| `src/components/flow-chart/` | Flow-chart modals, cards, slice layout, drag, constants, types |
+| `src/components/ProductionChain.tsx` | Standalone linear-chain calculator (separate from FlowChart) |
+| `src/lib/` | All domain logic: tree, flow rates, storage balance, persistence, planner |
+| `src/data/` | Game data JSON |
+
+## Flow Layout
+- **Horizontal only** (`TreeLevelSlices.tsx`) — columns by `displaySliceIndex`
+- Vertical `TreeLevel.tsx` is retained as legacy component code but not used by `FlowChart.tsx` runtime.

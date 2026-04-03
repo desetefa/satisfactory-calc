@@ -1,0 +1,44 @@
+---
+description: How machine options are sourced, filtered, and passed to the Add Machine modal
+globs: src/lib/chain.ts,src/components/flow-chart/AddMachineModal.tsx,src/components/flow-chart/TreeLevelSlices.tsx
+alwaysApply: false
+---
+
+# Machine Options
+
+## Source Functions — `src/lib/chain.ts`
+| Function | Returns |
+|----------|---------|
+| `getAllMachineOptions()` | Full catalog (extractors + all recipes), cached |
+| `getMachineOptionsForInput(itemKey)` | Recipes that consume `itemKey` + power-generator pseudo-options for supported fuels |
+| `getMachineOptionsForProduct(itemKey)` | All recipes (+ extractors) that produce `itemKey` |
+| `getExtractorMachineOptionsFull()` | All miner/pump options (pseudo `recipeKey = _raw_<resource>_<building>`) |
+| `sortOptionsNonAltFirst(opts)` | Sorts standard recipes before alternates |
+
+## Alternate Recipes
+`recipeName.startsWith("Alternate")` → alternate.  
+`AddMachineModal` has a `showAlternates` checkbox (default **off**) that filters them out.
+
+## `childOptions` in `TreeLevelSlices.tsx`
+Determines what is "recommended" when adding a machine next to an existing node:
+
+| Context | Recommended options |
+|---------|-------------------|
+| No `outputItemKey` on parent | `getAllMachineOptions()` (no filter) |
+| `sliceIdx === 0` and `parent.node.isRaw` | Extractors for **same resource** + `getMachineOptionsForInput(parent.outputItemKey)` |
+| `sliceIdx > 0` | `getMachineOptionsForInput` for every `outputItemKey` across all previous slices |
+| Default | `getMachineOptionsForInput(parent.outputItemKey)` |
+
+`isFiltered = true` whenever `options` is a subset; `allOptions = getAllMachineOptions()` is then passed to the modal so the "Other" section appears.
+
+## `AddMachineModal` Props
+```ts
+options: MachineOption[]      // recommended subset (or full list if unfiltered)
+allOptions?: MachineOption[]  // full catalog — triggers Recommended/Other split when provided
+```
+When `allOptions` is omitted, all options are shown in a single flat list.
+
+## Power Generator Extension — `src/lib/powerGenerators.ts`
+- Adds pseudo machine options (e.g. `_power_fuel-generator_fuel`) without replacing base recipe DB.
+- `getRecipeInputsPerMinute` checks these pseudo keys first so flow simulation can consume fuel/water inputs correctly.
+- Power pseudo-options output synthetic item key `power` for display and sink modeling.

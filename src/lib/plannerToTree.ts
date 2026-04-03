@@ -5,14 +5,9 @@
 
 import type { KeyName } from "./types";
 import type { ProductionPlan, PlannedMachineGroup } from "./productionPlanner";
-import { getRecipe, getBuildingForRecipe, recipePerMinute, getMiner, getBuilding, getAllBelts } from "./db";
+import { getRecipe, getBuildingForRecipe, recipePerMinute, getMiner, getBuilding } from "./db";
 import { createFlowNode, flowItemName, type TreeNode, type InputEdge } from "./flowChartModel";
-
-function pickDefaultBelt(throughput: number): string {
-  const belts = getAllBelts().sort((a, b) => a.rate - b.rate);
-  const match = belts.find((b) => b.rate >= throughput);
-  return match?.key_name ?? belts[belts.length - 1]?.key_name ?? "belt1";
-}
+import { pickDefaultTransportForItem } from "./flowTransport";
 
 function flowNodeFromGroup(g: PlannedMachineGroup): ReturnType<typeof createFlowNode> {
   if (g.recipeKey.startsWith("_raw_")) {
@@ -105,7 +100,7 @@ export function productionPlanToSliceTree(plan: ProductionPlan): { tree: TreeNod
 
   for (const g of groups) {
     const flow = flowNodeFromGroup(g);
-    const belt = pickDefaultBelt(flow.outputPerMachine * flow.count);
+    const belt = pickDefaultTransportForItem(flow.outputItemKey, flow.outputPerMachine * flow.count);
     nodeById.set(g.id, {
       id: flow.id,
       node: flow,
@@ -158,7 +153,7 @@ export function productionPlanToSliceTree(plan: ProductionPlan): { tree: TreeNod
         : (self.node.inputPerMachine ?? 0);
 
     self.parentId = parent.id;
-    self.incomingBeltKey = pickDefaultBelt(mainIngPerMin * self.node.count);
+    self.incomingBeltKey = pickDefaultTransportForItem(mainEdge?.itemKey ?? self.node.outputItemKey, mainIngPerMin * self.node.count);
 
     const inputEdges: InputEdge[] = [];
     for (const e of incoming) {
@@ -170,7 +165,7 @@ export function productionPlanToSliceTree(plan: ProductionPlan): { tree: TreeNod
       inputEdges.push({
         itemKey: e.itemKey,
         producerId: prodTn.node.id,
-        beltKey: pickDefaultBelt(ingPerMin * self.node.count),
+        beltKey: pickDefaultTransportForItem(e.itemKey, ingPerMin * self.node.count),
       });
     }
     if (inputEdges.length > 0) {

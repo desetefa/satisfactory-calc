@@ -1,0 +1,57 @@
+---
+description: TreeNode structure, display columns, flow slices, and mutation helpers
+globs: src/lib/flowChart*.ts,src/components/flow-chart/TreeLevelSlices.tsx
+alwaysApply: false
+---
+
+# Tree Structure & Slices
+
+## Two Slice Systems (Don't confuse them)
+
+| System | Function | Used for |
+|--------|----------|---------|
+| **Flow slices** | `getFlowSlices(tree)` | Simulation ordering in `computeFlowRates` |
+| **Display slices** | `getDisplaySlices(tree)` | Visual columns in `TreeLevelSlices` UI |
+
+`getDisplaySlices` buckets nodes by `displaySliceIndex ?? defaultFromMap`.  
+Default display slice matches the flow slice, so they start in sync.
+
+`resolveSupplierIds` and hover lineage (`getRelatedNodeIdsForHover`) treat recipe byproducts as real outputs, so hover/pin on consumers (e.g. residual fuel) includes byproduct producers and their upstream source chain.
+
+## Structural Relationships
+- Parent → child: `children: TreeNode[]` arrays (canonical structure)
+- Child → parent: `parentId` string
+- Use `findNode(tree, id)` to locate a node, `replaceNode(tree, newNode)` to update it
+
+## Key Mutation Functions — `src/lib/flowChartTree.ts`
+```ts
+replaceNode(tree, newNode)               // immutable swap by id
+reorderSiblingBefore(tree, parentId, activeId, insertBeforeId)
+moveNodeDisplaySlice(tree, parentId, activeId, targetSliceIdx, insertBeforeId)
+reorderNodeInColumn(tree, activeId, insertBeforeId, colIds)
+getDisplaySlices(tree)                   // → TreeNode[][]
+getRelatedNodeIdsForHover(tree, id)      // → Set<string>
+```
+
+## Key Mutation Functions — `src/lib/flowChartTreeMutations.ts`
+```ts
+addChildToNode(tree, parentId, newNode, insertAtIndex?, inputEdges?, displaySliceIndex?)
+updateNodeInTree(tree, nodeId, patch)
+synthesizeMissingInputEdges(tree)       // rebuild inputEdges from structure
+recalcTree(tree)                        // recompute totalOutput on every node
+mergeNodesAsChild / splitMergedNode
+```
+
+## Standard Mutation Wrapper
+```ts
+setTree((t) => recalcTree(synthesizeMissingInputEdges(mutate(t))));
+```
+
+## `displaySliceIndex`
+- Purely a display hint — does **not** affect flow simulation
+- `moveNodeDisplaySlice` updates it and pins siblings to same column
+- The root node's `displaySliceIndex` can be changed (non-extractor roots only)
+
+## Transport Keys on Edges
+- `incomingBeltKey` / `inputEdges[].beltKey` can hold either conveyor (`belt*`) or pipeline (`pipe*`) keys.
+- `updateAllBeltsInTree` applies global belt tier only to solid-item links; fluid links keep/normalize to pipe tiers.

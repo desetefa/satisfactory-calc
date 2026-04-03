@@ -49,6 +49,10 @@ export interface TreeNode {
   parentId: string | null;
   incomingBeltKey?: string;
   inputEdges?: InputEdge[];
+  /** Horizontal slice column in the flow UI only. Omitted = column from tree depth. Ignored by flow simulation. */
+  displaySliceIndex?: number;
+  /** Visual order within a display column. Omitted = DFS tree order. Set by vertical column reorder. */
+  displayColumnPosition?: number;
 }
 
 export function createFlowNode(

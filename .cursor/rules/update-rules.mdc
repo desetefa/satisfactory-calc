@@ -1,0 +1,20 @@
+---
+description: Reminder to keep cursor rules up to date when the codebase changes
+alwaysApply: true
+---
+
+# Keep Cursor Rules Up to Date
+
+After making any of the following kinds of changes, update the relevant rule file in `.cursor/rules/`:
+
+| Change type | Rule file to update |
+|-------------|-------------------|
+| New data type or changed field shape | `core-data-types.mdc` |
+| New state variable or changed update pattern in `FlowChart.tsx` | `state-architecture.mdc` |
+| New tree mutation function or changed slice logic | `tree-and-slices.mdc` |
+| New machine option source or changed filtering logic | `machine-options.mdc` |
+| Changed flow rate computation or storage balance | `flow-rates-and-storage.mdc` |
+| New persistence key, migration, or storage API | `persistence.mdc` |
+| New top-level directory, framework change, or major new feature | `project-overview.mdc` |
+
+Rules live in `.cursor/rules/*.mdc`. Keep each rule under ~50 lines — split into a new file if a topic grows large.

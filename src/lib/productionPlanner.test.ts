@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { planProductionFromTarget } from "./productionPlanner";
 import { productionPlanToSliceTree } from "./plannerToTree";
+import { getMachineOptionsForProduct, getRecipeInputsPerMinute } from "./chain";
+import { getAllProductKeysWithRecipes } from "./chain";
+import { getRecipe, recipePerMinute } from "./db";
 
 describe("planProductionFromTarget", () => {
   it("plans iron plate for one machine @ 100%", () => {
@@ -85,5 +88,77 @@ describe("productionPlanToSliceTree", () => {
         return walk(tree);
       })();
     expect(targetTn?.inputEdges?.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("quick build planner coverage", () => {
+  it("is deterministic for every quick-build recipe option and converts all successful plans", () => {
+    const allTargets = getAllProductKeysWithRecipes().flatMap((productKey) =>
+      getMachineOptionsForProduct(productKey).map((opt) => ({
+        productKey,
+        recipeKey: opt.recipeKey,
+      }))
+    );
+
+    let successCount = 0;
+    for (const target of allTargets) {
+      const first = planProductionFromTarget(target, { minerKey: "miner-mk2" });
+      const second = planProductionFromTarget(target, { minerKey: "miner-mk2" });
+      expect(first.ok).toBe(second.ok);
+      if (!first.ok || !second.ok) continue;
+      successCount += 1;
+      expect(first.plan.groups.length).toBe(second.plan.groups.length);
+      expect(first.plan.edges.length).toBe(second.plan.edges.length);
+      const { tree, targetNodeId } = productionPlanToSliceTree(first.plan);
+      expect(tree.node.outputItemKey).toBeTruthy();
+      expect(targetNodeId).toBeTruthy();
+    }
+    expect(successCount).toBeGreaterThan(0);
+  });
+
+  it("produces enough aggregate supply for every ingredient demand", () => {
+    const allTargets = getAllProductKeysWithRecipes().flatMap((productKey) =>
+      getMachineOptionsForProduct(productKey).map((opt) => ({
+        productKey,
+        recipeKey: opt.recipeKey,
+      }))
+    );
+
+    for (const target of allTargets) {
+      const planned = planProductionFromTarget(target, { minerKey: "miner-mk2" });
+      if (!planned.ok) continue;
+
+      const produced = new Map<string, number>();
+      const demanded = new Map<string, number>();
+
+      for (const g of planned.plan.groups) {
+        if (g.recipeKey.startsWith("_raw_")) {
+          produced.set(
+            g.outputItemKey,
+            (produced.get(g.outputItemKey) ?? 0) + g.outputPerMachine * g.machineCount
+          );
+          continue;
+        }
+
+        const recipe = getRecipe(g.recipeKey);
+        if (!recipe) continue;
+        const rates = recipePerMinute(recipe);
+        for (const [productKey, perMin] of rates.products) {
+          produced.set(productKey, (produced.get(productKey) ?? 0) + perMin * g.machineCount);
+        }
+
+        for (const input of getRecipeInputsPerMinute(g.recipeKey)) {
+          demanded.set(input.itemKey, (demanded.get(input.itemKey) ?? 0) + input.perMinute * g.machineCount);
+        }
+      }
+
+      for (const [itemKey, need] of demanded) {
+        const supply = produced.get(itemKey) ?? 0;
+        expect(
+          supply + 1e-6 >= need,
+          `insufficient supply for ${itemKey} in ${target.productKey} via ${target.recipeKey}: ${supply} < ${need}`
+        ).toBe(true);
+      }
+    }
   });
 });

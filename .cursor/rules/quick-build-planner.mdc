@@ -11,15 +11,19 @@ When changing the **+** quick build, multi-input planning, or plan→tree layout
 1. **Read first:** `docs/QUICK_BUILD_AND_PLANNER.md` (full flow, file map, limitations).
 
 2. **Planning logic** → `src/lib/productionPlanner.ts`  
-   - One machine @ 100% on chosen recipe; recursive upstream; cycles → error.  
+   - One machine @ 100% on chosen recipe; recursive upstream.  
+   - Ingredient planning now backtracks across candidate recipes (non-alt first) to avoid cyclic dead-ends when possible.  
    - Extractors: `_raw_*` keys via `getExtractorMachineOptionsFull`.
+   - Quick Build plans are template-cached for all product+recipe(+miner) combinations and cloned with fresh ids per request.
 
 3. **Plan → `TreeNode`** → `src/lib/plannerToTree.ts`  
    - Spine parent = deepest supplier; others → `inputEdges` with real **`FlowNode.id`**.
 
 4. **UI** → `src/components/QuickBuildModal.tsx` (product + recipe + miner; no target rate).
+   - Can be launched to either replace the active factory tree or create a brand-new factory tab named from the selected recipe.
 
 5. **Wire + balance** → `src/components/FlowChart.tsx` (`handleQuickBuildConfirm`, `autoBalanceAfterEdit`).
+   - `FlowChart` primes planner templates on mount (idle callback) via `primeQuickBuildTemplates()`.
 
 6. **Shared node types** → `src/lib/flowChartModel.ts` (also used by `chartStorage`).
 

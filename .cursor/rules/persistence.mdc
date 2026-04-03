@@ -1,0 +1,44 @@
+---
+description: Workspace persistence, localStorage keys, and migration helpers
+globs: src/lib/chartStorage.ts
+alwaysApply: false
+---
+
+# Persistence — `src/lib/chartStorage.ts`
+
+## localStorage Keys
+| Key | Content |
+|-----|---------|
+| `satisfactory-calc-workspaces` | JSON array of `WorkspaceDoc` |
+| `satisfactory-calc-last-workspace` | Last opened workspace id |
+| `satisfactory-calc-charts` | **Legacy** — migrated to workspaces on first load |
+
+## Core API
+```ts
+saveWorkspace(ws: WorkspaceDoc): void
+loadWorkspace(id: string): WorkspaceDoc | null
+getSavedWorkspaces(): WorkspaceDoc[]
+deleteWorkspace(id: string): void
+getLastWorkspaceId(): string | null
+migrateChartsToWorkspaces(): void   // called once at boot
+```
+
+## Boot Sequence (`FlowChart.tsx`)
+```ts
+useEffect(() => {
+  const boot = readPersistedBoot();   // migrateChartsToWorkspaces + loadWorkspace
+  resetWorkspace(boot.workspace);     // no undo entry created
+  // each factory tree is recalcTree(synthesizeMissingInputEdges(f.tree))
+}, []);
+```
+
+## Factory Connections
+`FactoryExport.id === FactoryImport.id` — the same `id` links both sides.  
+`addFactoryConnection` / `removeFactoryConnection` update both factories atomically.  
+`getImportSupply(factory)` → `Map<KeyName, totalRatePerMin>` for use in `computeFlowRates`.
+
+## Settings Defaults
+`resolveFactorySettings(factory)` fills in:
+- `preferredBeltKey` → `"belt4"` if missing
+- `autoBalanceEnabled` → `false` if missing
+- `storageReserves` → `{}` if missing

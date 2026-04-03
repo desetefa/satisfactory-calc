@@ -26,6 +26,9 @@ export function getItemDisplayName(
   key: string,
   density: ItemDisplayDensity = "comfortable"
 ): string {
+  if (key === "power") {
+    return density === "compact" ? "Power" : "Power";
+  }
   const raw = getItem(key as KeyName)?.name ?? getFluid(key as KeyName)?.name ?? key;
   return abbreviateItemDisplayName(raw, density);
 }

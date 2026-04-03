@@ -26,3 +26,23 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
+
+/* Scrollbar styling for dark theme with zinc accents */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #18181b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #52525b;
+  border-radius: 5px;
+  border: 2px solid #18181b;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #71717a;
+}

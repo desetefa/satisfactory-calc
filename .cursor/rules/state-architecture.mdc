@@ -1,0 +1,55 @@
+---
+description: How workspace/factory/tree state is managed in FlowChart.tsx, including undo/redo
+globs: src/components/FlowChart.tsx
+alwaysApply: false
+---
+
+# State Architecture — `FlowChart.tsx`
+
+## State Shape
+```
+workspace: WorkspaceDoc          ← single source of truth
+activeFactoryId: string          ← which factory tab is open
+```
+`activeFactory = workspace.factories.find(id === activeFactoryId)`  
+`tree = activeFactory.tree`
+
+## Quick Build Mode
+- `quickBuildAsFactory: boolean` controls whether Quick Build replaces the active factory tree or creates a new factory tab from the selected recipe.
+
+## Delete Confirm State
+- `deleteConfirm` in `FlowChart.tsx` drives a styled confirm modal for destructive actions (delete workspace / delete factory).
+- Destructive menu/tab actions should set `deleteConfirm` first; actual delete handlers run only from modal confirm.
+
+## Updating State
+
+**`setWorkspace(updaterOrValue)`** — use for ALL edits the user should be able to undo.  
+Pushes the previous workspace onto `pastRef` (max 50) and clears `futureRef`.
+
+**`resetWorkspace(ws)`** — use ONLY for boot/load/new-workspace/save-as.  
+Clears history stacks entirely.
+
+**`updateActiveFactory(updater)`** — calls `setWorkspace` internally; updates only the active factory.
+
+**`setTree(updaterOrValue)`** — calls `updateActiveFactory`; updates only `activeFactory.tree`.
+
+## Standard Tree Mutation Pattern
+```ts
+setTree((t) => recalcTree(synthesizeMissingInputEdges(/* mutation */)));
+```
+Always wrap tree changes with `synthesizeMissingInputEdges` then `recalcTree`.
+
+When adding a new machine, immediately apply `preferredBeltKey` to the new child incoming belt and all of its input edges (including synthesized ones) before optional auto-balance.
+
+## Undo / Redo
+- Stacks: `pastRef: useRef<WorkspaceDoc[]>`, `futureRef: useRef<WorkspaceDoc[]>`
+- `historyVersion` state is bumped to re-render undo/redo buttons
+- `canUndo = pastRef.current.length > 0`, `canRedo = futureRef.current.length > 0`
+- Keyboard: Ctrl/Cmd+Z (undo), Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z (redo)
+- Skipped when focus is in `INPUT`, `TEXTAREA`, or `contentEditable`
+
+## Derived State
+```ts
+flowRates = useMemo(() => computeFlowRates(tree, importSupply), [tree, importSupply])
+importSupply = useMemo(() => getImportSupply(activeFactory), [activeFactory])
+```
